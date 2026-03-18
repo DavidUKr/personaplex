@@ -57,13 +57,13 @@ To enable background user transcription and per-session conversation logs:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server \
   --ssl "$SSL_DIR" \
-  --enable-user-transcription \
+  --enable-transcription \
   --conversation-log-dir "./logs/conversations"
 ```
 
 Transcription-related server options and defaults:
 
-- `--enable-user-transcription`
+- `--enable-transcription`
   - Disabled by default.
   - When enabled, the server runs background user speech-to-text and writes one log file per session.
 - `--transcription-model-id`

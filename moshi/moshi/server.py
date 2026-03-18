@@ -404,7 +404,7 @@ def main():
                         help="Offload LM model layers to CPU when GPU memory is insufficient. "
                              "Requires 'accelerate' package.")
     parser.add_argument(
-        "--enable-user-transcription",
+        "--enable-transcription",
         action="store_true",
         help="Run background user speech-to-text transcription and persist per-session conversation logs.",
     )
@@ -469,7 +469,7 @@ def main():
         f"Static path does not exist: {static_path}."
     logger.info(f"static_path = {static_path}")
     args.device = torch_auto_device(args.device)
-    if args.enable_user_transcription:
+    if args.enable_transcription:
         logger.info(
             "user transcription enabled: model=%s log_dir=%s chunk=%.2fs overlap=%.2fs",
             args.transcription_model_id,
@@ -525,7 +525,7 @@ def main():
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
         transcription_config=TranscriptionConfig(
-            enabled=args.enable_user_transcription,
+            enabled=args.enable_transcription,
             model_id=args.transcription_model_id,
             chunk_seconds=args.transcription_chunk_seconds,
             overlap_seconds=args.transcription_overlap_seconds,
