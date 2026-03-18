@@ -53,6 +53,38 @@ Launch server for live interaction (temporary SSL certs for https):
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
 ```
 
+To enable background user transcription and per-session conversation logs:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server \
+  --ssl "$SSL_DIR" \
+  --enable-user-transcription \
+  --conversation-log-dir "./logs/conversations"
+```
+
+Transcription-related server options and defaults:
+
+- `--enable-user-transcription`
+  - Disabled by default.
+  - When enabled, the server runs background user speech-to-text and writes one log file per session.
+- `--transcription-model-id`
+  - Default: `distil-whisper/distil-large-v3`
+  - Sets the Hugging Face speech-to-text model used for user transcription.
+- `--conversation-log-dir`
+  - Default: `./logs/conversations`
+  - Directory where per-session UTF-8 conversation logs are created.
+- `--transcription-chunk-seconds`
+  - Default: `6.0`
+  - Size of each transcription window before sending audio to the ASR model.
+- `--transcription-overlap-seconds`
+  - Default: `1.5`
+  - Overlap between consecutive transcription windows to reduce word cuts at chunk boundaries.
+
+Each conversation log is written in chronological order with one entry per line. The current tags are:
+
+- `[initial_prompt]` for the initial text prompt sent when the session starts
+- `[user]` for finalized speech-to-text segments from microphone input
+- `[model]` for generated assistant text grouped into readable segments
+
 **CPU Offload:** If your GPU has insufficient memory, use the `--cpu-offload` flag to offload model layers to CPU. This requires the `accelerate` package (`pip install accelerate`):
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --cpu-offload
@@ -62,6 +94,8 @@ Access the Web UI from a browser at `localhost:8998` if running locally, otherwi
 ```
 Access the Web UI directly at https://11.54.401.33:8998
 ```
+
+When transcription is enabled, the server writes one UTF-8 log file per session with chronological tagged lines such as `[initial_prompt]`, `[user]`, and `[model]`.
 
 ### Offline Evaluation
 
