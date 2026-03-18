@@ -58,6 +58,25 @@ SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --cpu-offload
 ```
 
+#### Live Prompting
+
+To inject new prompts during an active live session, start the server with `--live-prompt-stdin`:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin
+```
+
+When enabled, each non-empty line typed into the same terminal is queued as a new prompt for the current active session. Once a prompt is queued, user audio is no longer fed to the model until the prompt is injected and live turn-taking resumes.
+
+By default, live prompts are appended to the session's existing text prompt. Use `--live-prompt-mode replace` to replace the current prompt instead:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-mode replace
+```
+
+Live prompting can be combined with CPU offload if needed:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --cpu-offload --live-prompt-stdin
+```
+
 Access the Web UI from a browser at `localhost:8998` if running locally, otherwise look for the access link printed by the script:
 ```
 Access the Web UI directly at https://11.54.401.33:8998
