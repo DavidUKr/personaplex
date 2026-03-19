@@ -35,6 +35,7 @@ import tarfile
 import secrets
 import sys
 from typing import Literal, Optional
+from uuid import uuid4
 
 import aiohttp
 from aiohttp import web
@@ -46,6 +47,13 @@ import torch
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
+from .transcription import (
+    ConversationLogger,
+    ModelTextLogger,
+    SessionTranscriber,
+    TranscriptionConfig,
+    TranscriptionService,
+)
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
 
@@ -101,16 +109,20 @@ class ServerState:
     text_tokenizer: sentencepiece.SentencePieceProcessor
     lm_gen: LMGen
     lock: asyncio.Lock
+    transcription_service: TranscriptionService | None
+    transcription_config: TranscriptionConfig
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
-                 save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append"):
+                 save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
+                 transcription_config: TranscriptionConfig | None = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
         self.live_prompt_mode = live_prompt_mode
+        self.transcription_config = transcription_config or TranscriptionConfig()
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
                             audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
@@ -125,6 +137,9 @@ class ServerState:
         self.other_mimi.streaming_forever(1)
         self.lm_gen.streaming_forever(1)
         self.active_prompt_queue: Optional[asyncio.Queue[PromptCommand]] = None
+        self.transcription_service = None
+        if self.transcription_config.enabled:
+            self.transcription_service = TranscriptionService(self.transcription_config, self.device)
     
     def warmup(self):
         for _ in range(4):
@@ -163,243 +178,248 @@ class ServerState:
         peer = request.remote  # IP
         peer_port = request.transport.get_extra_info("peername")[1]  # Port
         clog.log("info", f"Incoming connection from {peer}:{peer_port}")
-
-        # self.lm_gen.temp = float(request.query["audio_temperature"])
-        # self.lm_gen.temp_text = float(request.query["text_temperature"])
-        # self.lm_gen.top_k_text = max(1, int(request.query["text_topk"]))
-        # self.lm_gen.top_k = max(1, int(request.query["audio_topk"]))
-        
-        # Construct full voice prompt path
-        requested_voice_prompt_path = None
-        voice_prompt_path = None
-        if self.voice_prompt_dir is not None:
-            voice_prompt_filename = request.query["voice_prompt"]
+        session_id = uuid4().hex[:12]
+        conversation_logger = ConversationLogger(self.transcription_config.log_dir, session_id)
+        model_text_logger = ModelTextLogger(conversation_logger)
+        session_transcriber: SessionTranscriber | None = None
+        try:
             requested_voice_prompt_path = None
-            if voice_prompt_filename is not None:
-                requested_voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_filename)
-            # If the voice prompt file does not exist, find a valid (s0) voiceprompt file in the directory
-            if requested_voice_prompt_path is None or not os.path.exists(requested_voice_prompt_path):
-                raise FileNotFoundError(
-                    f"Requested voice prompt '{voice_prompt_filename}' not found in '{self.voice_prompt_dir}'"
-                )
-            else:
-                voice_prompt_path = requested_voice_prompt_path
-                
-        if self.lm_gen.voice_prompt != voice_prompt_path:
-            if voice_prompt_path.endswith('.pt'):
-                # Load pre-saved voice prompt embeddings
-                self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
-            else:
-                self.lm_gen.load_voice_prompt(voice_prompt_path)
-        initial_text_prompt = request.query["text_prompt"].strip()
-        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(initial_text_prompt)) if len(initial_text_prompt) > 0 else None
-        seed = int(request.query["seed"]) if "seed" in request.query else None
-        session_prompt_queue: asyncio.Queue[PromptCommand] = asyncio.Queue()
-
-        async def recv_loop():
-            nonlocal close
-            try:
-                async for message in ws:
-                    if message.type == aiohttp.WSMsgType.ERROR:
-                        clog.log("error", f"{ws.exception()}")
-                        break
-                    elif message.type == aiohttp.WSMsgType.CLOSED:
-                        break
-                    elif message.type == aiohttp.WSMsgType.CLOSE:
-                        break
-                    elif message.type != aiohttp.WSMsgType.BINARY:
-                        clog.log("error", f"unexpected message type {message.type}")
-                        continue
-                    message = message.data
-                    if not isinstance(message, bytes):
-                        clog.log("error", f"unsupported message type {type(message)}")
-                        continue
-                    if len(message) == 0:
-                        clog.log("warning", "empty message")
-                        continue
-                    kind = message[0]
-                    if kind == 1:  # audio
-                        payload = message[1:]
-                        opus_reader.append_bytes(payload)
-                    else:
-                        clog.log("warning", f"unknown message kind {kind}")
-            finally:
-                close = True
-                clog.log("info", "connection closed")
-
-        async def opus_loop():
-            all_pcm_data = None
-            effective_prompt_text = initial_text_prompt
-            pending_prompt_commands: list[PromptCommand] = []
-            prompt_interrupt_active = False
-            boundary_streak = 0
-            boundary_steps = 0
-
-            def drain_prompt_queue():
-                nonlocal prompt_interrupt_active, all_pcm_data
-                while True:
-                    try:
-                        pending_prompt_commands.append(session_prompt_queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-                if pending_prompt_commands and not prompt_interrupt_active:
-                    prompt_interrupt_active = True
-                    all_pcm_data = None
-                    _ = opus_reader.read_pcm()
-                    clog.log("info", "queued live text prompt; interrupting user audio feed")
-
-            async def emit_tokens(tokens: torch.Tensor):
-                text_token = tokens[0, 0, 0].item()
-                assert tokens.shape[1] == self.lm_gen.lm_model.dep_q + 1
-                main_pcm = self.mimi.decode(tokens[:, 1:9])
-                _ = self.other_mimi.decode(tokens[:, 1:9])
-                main_pcm = main_pcm.cpu()
-                opus_writer.append_pcm(main_pcm[0, 0].numpy())
-                if text_token not in (0, TEXT_TOKEN_PAD):
-                    _text = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
-                    _text = _text.replace("▁", " ")
-                    msg = b"\x02" + bytes(_text, encoding="utf8")
-                    await ws.send_bytes(msg)
-                return text_token
-
-            def build_effective_prompt(new_prompt_text: str) -> str:
-                if self.live_prompt_mode == "replace" or not effective_prompt_text:
-                    return new_prompt_text
-                return f"{effective_prompt_text}\n{new_prompt_text}"
-
-            def inject_prompt(prompt_text: str):
-                nonlocal effective_prompt_text
-                effective_prompt_text = build_effective_prompt(prompt_text)
-                prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(effective_prompt_text))
-                self.lm_gen.step_text_prompt_tokens(prompt_tokens)
-                self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
-
-            while True:
-                if close:
-                    return
-                await asyncio.sleep(0.001)
-                drain_prompt_queue()
-
-                if prompt_interrupt_active:
-                    _ = opus_reader.read_pcm()
-                    silence_tokens = self.lm_gen.step(
-                        moshi_tokens=self.lm_gen._encode_zero_frame(),
-                        text_token=self.lm_gen.zero_text_code,
-                        input_tokens=self.lm_gen._encode_sine_frame(),
+            voice_prompt_path = None
+            if self.voice_prompt_dir is not None:
+                voice_prompt_filename = request.query["voice_prompt"]
+                if voice_prompt_filename is not None:
+                    requested_voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_filename)
+                if requested_voice_prompt_path is None or not os.path.exists(requested_voice_prompt_path):
+                    raise FileNotFoundError(
+                        f"Requested voice prompt '{voice_prompt_filename}' not found in '{self.voice_prompt_dir}'"
                     )
-                    if silence_tokens is not None:
-                        text_token = await emit_tokens(silence_tokens)
-                        if text_token in (TEXT_TOKEN_EOS, TEXT_TOKEN_PAD):
-                            boundary_streak += 1
-                        else:
-                            boundary_streak = 0
-                    boundary_steps += 1
-                    if boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK or boundary_steps >= LIVE_PROMPT_MAX_STEPS:
-                        for prompt_command in pending_prompt_commands:
-                            inject_prompt(prompt_command.text)
-                            clog.log("info", f"applied live prompt: {prompt_command.text}")
-                        pending_prompt_commands.clear()
-                        prompt_interrupt_active = False
-                        boundary_streak = 0
-                        boundary_steps = 0
-                        all_pcm_data = None
-                    continue
+                voice_prompt_path = requested_voice_prompt_path
 
-                pcm = opus_reader.read_pcm()
-                if pcm.shape[-1] == 0:
-                    continue
-                if all_pcm_data is None:
-                    all_pcm_data = pcm
+            if self.lm_gen.voice_prompt != voice_prompt_path:
+                if voice_prompt_path.endswith(".pt"):
+                    self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
                 else:
-                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
-                while all_pcm_data.shape[-1] >= self.frame_size:
-                    chunk = all_pcm_data[: self.frame_size]
-                    all_pcm_data = all_pcm_data[self.frame_size:]
-                    chunk = torch.from_numpy(chunk)
-                    chunk = chunk.to(device=self.device)[None, None]
-                    codes = self.mimi.encode(chunk)
-                    _ = self.other_mimi.encode(chunk)
-                    for c in range(codes.shape[-1]):
-                        drain_prompt_queue()
-                        if prompt_interrupt_active:
+                    self.lm_gen.load_voice_prompt(voice_prompt_path)
+
+            initial_text_prompt = request.query["text_prompt"].strip()
+            self.lm_gen.text_prompt_tokens = (
+                self.text_tokenizer.encode(wrap_with_system_tags(initial_text_prompt))
+                if initial_text_prompt
+                else None
+            )
+            seed = int(request.query["seed"]) if "seed" in request.query else None
+            session_prompt_queue: asyncio.Queue[PromptCommand] = asyncio.Queue()
+            await conversation_logger.write_entry("initial_prompt", initial_text_prompt)
+
+            async def recv_loop():
+                nonlocal close
+                try:
+                    async for message in ws:
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            clog.log("error", f"{ws.exception()}")
                             break
-                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
-                        if tokens is None:
+                        if message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                            break
+                        if message.type != aiohttp.WSMsgType.BINARY:
+                            clog.log("error", f"unexpected message type {message.type}")
                             continue
-                        await emit_tokens(tokens)
-                    if prompt_interrupt_active or all_pcm_data is None:
-                        break
-
-        async def send_loop():
-            while True:
-                if close:
-                    return
-                await asyncio.sleep(0.001)
-                msg = opus_writer.read_bytes()
-                if len(msg) > 0:
-                    await ws.send_bytes(b"\x01" + msg)
-
-        clog.log("info", "accepted connection")
-        if len(request.query["text_prompt"]) > 0:
-            clog.log("info", f"text prompt: {request.query['text_prompt']}")
-        if len(request.query["voice_prompt"]) > 0:
-            clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
-        close = False
-        async with self.lock:
-            if seed is not None and seed != -1:
-                seed_all(seed)
-
-            opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
-            opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
-            self.mimi.reset_streaming()
-            self.other_mimi.reset_streaming()
-            self.lm_gen.reset_streaming()
-            async def is_alive():
-                if close or ws.closed:
-                    return False
-                try:
-                    # Check for disconnect without waiting too long
-                    msg = await asyncio.wait_for(ws.receive(), timeout=0.01)
-                    if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        return False
-                except asyncio.TimeoutError:
-                    # No messages → client probably still alive
-                    return True
-                except aiohttp.ClientConnectionError:
-                    return False
-                return True
-            # Reuse mimi for encoding voice prompt and then reset it before conversation starts
-            await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
-            self.mimi.reset_streaming()
-            clog.log("info", "done with system prompts")
-            # Send the handshake.
-            if await is_alive():
-                await ws.send_bytes(b"\x00")
-                clog.log("info", "sent handshake bytes")
-                self.set_active_prompt_queue(session_prompt_queue)
-                try:
-                    # Clean cancellation manager
-                    tasks = [
-                        asyncio.create_task(recv_loop()),
-                        asyncio.create_task(opus_loop()),
-                        asyncio.create_task(send_loop()),
-                    ]
-
-                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                    # Force-kill remaining tasks
-                    for task in pending:
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-                    await ws.close()
-                    clog.log("info", "session closed")
-                    # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
+                        payload_message = message.data
+                        if not isinstance(payload_message, bytes):
+                            clog.log("error", f"unsupported message type {type(payload_message)}")
+                            continue
+                        if len(payload_message) == 0:
+                            clog.log("warning", "empty message")
+                            continue
+                        kind = payload_message[0]
+                        if kind == 1:
+                            opus_reader.append_bytes(payload_message[1:])
+                        else:
+                            clog.log("warning", f"unknown message kind {kind}")
                 finally:
-                    self.clear_active_prompt_queue(session_prompt_queue)
-        clog.log("info", "done with connection")
-        return ws
+                    close = True
+                    clog.log("info", "connection closed")
+
+            async def opus_loop():
+                all_pcm_data = None
+                effective_prompt_text = initial_text_prompt
+                pending_prompt_commands: list[PromptCommand] = []
+                prompt_interrupt_active = False
+                boundary_streak = 0
+                boundary_steps = 0
+
+                def drain_prompt_queue():
+                    nonlocal prompt_interrupt_active, all_pcm_data
+                    while True:
+                        try:
+                            pending_prompt_commands.append(session_prompt_queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                    if pending_prompt_commands and not prompt_interrupt_active:
+                        prompt_interrupt_active = True
+                        all_pcm_data = None
+                        _ = opus_reader.read_pcm()
+                        clog.log("info", "queued live text prompt; interrupting user audio feed")
+
+                async def emit_tokens(tokens: torch.Tensor):
+                    text_token = tokens[0, 0, 0].item()
+                    assert tokens.shape[1] == self.lm_gen.lm_model.dep_q + 1
+                    main_pcm = self.mimi.decode(tokens[:, 1:9])
+                    _ = self.other_mimi.decode(tokens[:, 1:9])
+                    main_pcm = main_pcm.cpu()
+                    opus_writer.append_pcm(main_pcm[0, 0].numpy())
+                    if text_token not in (0, TEXT_TOKEN_PAD):
+                        piece = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
+                        piece = piece.replace("▁", " ")
+                        await model_text_logger.append_piece(piece)
+                        await ws.send_bytes(b"\x02" + bytes(piece, encoding="utf8"))
+                    return text_token
+
+                def build_effective_prompt(new_prompt_text: str) -> str:
+                    if self.live_prompt_mode == "replace" or not effective_prompt_text:
+                        return new_prompt_text
+                    return f"{effective_prompt_text}\n{new_prompt_text}"
+
+                def inject_prompt(prompt_text: str):
+                    nonlocal effective_prompt_text
+                    effective_prompt_text = build_effective_prompt(prompt_text)
+                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(effective_prompt_text))
+                    self.lm_gen.step_text_prompt_tokens(prompt_tokens)
+                    self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
+
+                while True:
+                    if close:
+                        return
+                    await asyncio.sleep(0.001)
+                    drain_prompt_queue()
+
+                    if prompt_interrupt_active:
+                        _ = opus_reader.read_pcm()
+                        silence_tokens = self.lm_gen.step(
+                            moshi_tokens=self.lm_gen._encode_zero_frame(),
+                            text_token=self.lm_gen.zero_text_code,
+                            input_tokens=self.lm_gen._encode_sine_frame(),
+                        )
+                        if silence_tokens is not None:
+                            text_token = await emit_tokens(silence_tokens)
+                            if text_token in (TEXT_TOKEN_EOS, TEXT_TOKEN_PAD):
+                                boundary_streak += 1
+                            else:
+                                boundary_streak = 0
+                        boundary_steps += 1
+                        if boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK or boundary_steps >= LIVE_PROMPT_MAX_STEPS:
+                            for prompt_command in pending_prompt_commands:
+                                inject_prompt(prompt_command.text)
+                                await conversation_logger.write_entry("prompt", prompt_command.text)
+                                clog.log("info", f"applied live prompt: {prompt_command.text}")
+                            pending_prompt_commands.clear()
+                            prompt_interrupt_active = False
+                            boundary_streak = 0
+                            boundary_steps = 0
+                            all_pcm_data = None
+                        continue
+
+                    pcm = opus_reader.read_pcm()
+                    if pcm.shape[-1] == 0:
+                        continue
+                    if session_transcriber is not None:
+                        session_transcriber.submit_pcm(pcm)
+                    if all_pcm_data is None:
+                        all_pcm_data = pcm
+                    else:
+                        all_pcm_data = np.concatenate((all_pcm_data, pcm))
+                    while all_pcm_data.shape[-1] >= self.frame_size:
+                        chunk = all_pcm_data[: self.frame_size]
+                        all_pcm_data = all_pcm_data[self.frame_size:]
+                        chunk = torch.from_numpy(chunk)
+                        chunk = chunk.to(device=self.device)[None, None]
+                        codes = self.mimi.encode(chunk)
+                        _ = self.other_mimi.encode(chunk)
+                        for c in range(codes.shape[-1]):
+                            drain_prompt_queue()
+                            if prompt_interrupt_active:
+                                break
+                            tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                            if tokens is None:
+                                continue
+                            await emit_tokens(tokens)
+                        if prompt_interrupt_active or all_pcm_data is None:
+                            break
+
+            async def send_loop():
+                while True:
+                    if close:
+                        return
+                    await asyncio.sleep(0.001)
+                    msg = opus_writer.read_bytes()
+                    if len(msg) > 0:
+                        await ws.send_bytes(b"\x01" + msg)
+
+            clog.log("info", "accepted connection")
+            if initial_text_prompt:
+                clog.log("info", f"text prompt: {initial_text_prompt}")
+            if len(request.query["voice_prompt"]) > 0:
+                clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
+            close = False
+            async with self.lock:
+                if seed is not None and seed != -1:
+                    seed_all(seed)
+
+                opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
+                opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
+                self.mimi.reset_streaming()
+                self.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                if self.transcription_service is not None:
+                    session_transcriber = self.transcription_service.create_session(
+                        conversation_logger=conversation_logger,
+                        sample_rate=self.mimi.sample_rate,
+                    )
+                    session_transcriber.start()
+
+                async def is_alive():
+                    if close or ws.closed:
+                        return False
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=0.01)
+                        if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            return False
+                    except asyncio.TimeoutError:
+                        return True
+                    except aiohttp.ClientConnectionError:
+                        return False
+                    return True
+
+                await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
+                self.mimi.reset_streaming()
+                clog.log("info", "done with system prompts")
+                if await is_alive():
+                    await ws.send_bytes(b"\x00")
+                    clog.log("info", "sent handshake bytes")
+                    self.set_active_prompt_queue(session_prompt_queue)
+                    try:
+                        tasks = [
+                            asyncio.create_task(recv_loop()),
+                            asyncio.create_task(opus_loop()),
+                            asyncio.create_task(send_loop()),
+                        ]
+                        _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        for task in pending:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                        await ws.close()
+                        clog.log("info", "session closed")
+                    finally:
+                        self.clear_active_prompt_queue(session_prompt_queue)
+            clog.log("info", "done with connection")
+            return ws
+        finally:
+            await model_text_logger.flush()
+            if session_transcriber is not None:
+                await session_transcriber.close()
+            await conversation_logger.close()
 
 
 async def stdin_prompt_loop(state: ServerState):
@@ -503,6 +523,35 @@ def main():
         help="How stdin live prompts combine with the current session prompt.",
     )
     parser.add_argument(
+        "--enable-transcription",
+        action="store_true",
+        help="Run background user speech-to-text transcription and persist per-session conversation logs.",
+    )
+    parser.add_argument(
+        "--transcription-model-id",
+        type=str,
+        default="distil-whisper/distil-large-v3",
+        help="Hugging Face model id to use for background user transcription.",
+    )
+    parser.add_argument(
+        "--conversation-log-dir",
+        type=str,
+        default="./logs/conversations",
+        help="Directory where per-session conversation logs are written.",
+    )
+    parser.add_argument(
+        "--transcription-chunk-seconds",
+        type=float,
+        default=6.0,
+        help="User audio chunk size in seconds for each background transcription pass.",
+    )
+    parser.add_argument(
+        "--transcription-overlap-seconds",
+        type=float,
+        default=1.5,
+        help="Overlap between consecutive transcription chunks in seconds.",
+    )
+    parser.add_argument(
         "--voice-prompt-dir",
         type=str,
         help=(
@@ -521,6 +570,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.transcription_chunk_seconds <= 0:
+        raise ValueError("--transcription-chunk-seconds must be > 0")
+    if args.transcription_overlap_seconds < 0:
+        raise ValueError("--transcription-overlap-seconds must be >= 0")
     args.voice_prompt_dir = _get_voice_prompt_dir(
         args.voice_prompt_dir,
         args.hf_repo,
@@ -535,6 +588,14 @@ def main():
         f"Static path does not exist: {static_path}."
     logger.info(f"static_path = {static_path}")
     args.device = torch_auto_device(args.device)
+    if args.enable_transcription:
+        logger.info(
+            "user transcription enabled: model=%s log_dir=%s chunk=%.2fs overlap=%.2fs",
+            args.transcription_model_id,
+            args.conversation_log_dir,
+            args.transcription_chunk_seconds,
+            args.transcription_overlap_seconds,
+        )
 
     seed_all(42424242)
 
@@ -583,6 +644,13 @@ def main():
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
         live_prompt_mode=args.live_prompt_mode,
+        transcription_config=TranscriptionConfig(
+            enabled=args.enable_transcription,
+            model_id=args.transcription_model_id,
+            chunk_seconds=args.transcription_chunk_seconds,
+            overlap_seconds=args.transcription_overlap_seconds,
+            log_dir=Path(args.conversation_log_dir),
+        ),
     )
     logger.info("warming up the model")
     state.warmup()
@@ -600,6 +668,8 @@ def main():
             stdin_task.cancel()
             with suppress(asyncio.CancelledError):
                 await stdin_task
+        if state.transcription_service is not None:
+            state.transcription_service.shutdown()
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
