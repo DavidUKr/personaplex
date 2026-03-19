@@ -308,6 +308,7 @@ class ServerState:
                         boundary_steps += 1
                         if boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK or boundary_steps >= LIVE_PROMPT_MAX_STEPS:
                             for prompt_command in pending_prompt_commands:
+                                await model_text_logger.flush()
                                 inject_prompt(prompt_command.text)
                                 await conversation_logger.write_entry("prompt", prompt_command.text)
                                 clog.log("info", f"applied live prompt: {prompt_command.text}")

@@ -84,6 +84,7 @@ Each conversation log is written in chronological order with one entry per line.
 - `[initial_prompt]` for the initial text prompt sent when the session starts
 - `[user]` for finalized speech-to-text segments from microphone input
 - `[model]` for generated assistant text grouped into readable segments
+- `[prompt]` for live prompts injected during an active session
 
 **CPU Offload:** If your GPU has insufficient memory, use the `--cpu-offload` flag to offload model layers to CPU. This requires the `accelerate` package (`pip install accelerate`):
 ```bash
@@ -114,7 +115,7 @@ Access the Web UI from a browser at `localhost:8998` if running locally, otherwi
 Access the Web UI directly at https://11.54.401.33:8998
 ```
 
-When transcription is enabled, the server writes one UTF-8 log file per session with chronological tagged lines such as `[initial_prompt]`, `[user]`, and `[model]`.
+When transcription is enabled, the server writes one UTF-8 log file per session with chronological tagged lines such as `[initial_prompt]`, `[user]`, `[model]`, and `[prompt]`. Live injected prompts are appended to that same per-session log when they are applied.
 
 ### Offline Evaluation
 
