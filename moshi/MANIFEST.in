@@ -3,3 +3,4 @@ include *.md
 include *.cfg
 include requirements.txt
 include moshi/py.typed
+include moshi/llm_sys_prompt.txt

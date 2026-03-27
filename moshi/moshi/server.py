@@ -46,6 +46,7 @@ import sphn
 import torch
 
 from .client_utils import make_log, colorize
+from .llm_prompt_watcher import LLMWatcherConfig, OpenAILogPromptWatcher
 from .models import loaders, MimiModel, LMModel, LMGen
 from .transcription import (
     ConversationLogger,
@@ -111,11 +112,13 @@ class ServerState:
     lock: asyncio.Lock
     transcription_service: TranscriptionService | None
     transcription_config: TranscriptionConfig
+    llm_watcher: OpenAILogPromptWatcher | None
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
-                 transcription_config: TranscriptionConfig | None = None):
+                 transcription_config: TranscriptionConfig | None = None,
+                 llm_watcher_config: LLMWatcherConfig | None = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -137,9 +140,19 @@ class ServerState:
         self.other_mimi.streaming_forever(1)
         self.lm_gen.streaming_forever(1)
         self.active_prompt_queue: Optional[asyncio.Queue[PromptCommand]] = None
+        self.active_conversation_log_path: Optional[Path] = None
+        self.last_conversation_log_path: Optional[Path] = None
         self.transcription_service = None
         if self.transcription_config.enabled:
             self.transcription_service = TranscriptionService(self.transcription_config, self.device)
+        self.llm_watcher = None
+        llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
+        if llm_watcher_config.enabled:
+            self.llm_watcher = OpenAILogPromptWatcher(
+                llm_watcher_config,
+                get_target_log_path=self.get_llm_target_log_path,
+                queue_live_prompt=self.queue_live_prompt,
+            )
     
     def warmup(self):
         for _ in range(4):
@@ -163,6 +176,28 @@ class ServerState:
         if self.active_prompt_queue is prompt_queue:
             self.active_prompt_queue = None
 
+    def set_active_conversation_log_path(self, log_path: Path):
+        self.active_conversation_log_path = log_path
+        self.last_conversation_log_path = log_path
+
+    def clear_active_conversation_log_path(self, log_path: Path):
+        if self.active_conversation_log_path == log_path:
+            self.active_conversation_log_path = None
+            self.last_conversation_log_path = log_path
+
+    def get_llm_target_log_path(self) -> Optional[Path]:
+        if self.active_conversation_log_path is not None:
+            return self.active_conversation_log_path
+        if self.last_conversation_log_path is not None and self.last_conversation_log_path.exists():
+            return self.last_conversation_log_path
+        log_dir = self.transcription_config.log_dir
+        if not log_dir.exists():
+            return None
+        candidates = [path for path in log_dir.glob("*.log") if path.is_file()]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.name)
+
     def queue_live_prompt(self, prompt_text: str) -> bool:
         prompt_queue = self.active_prompt_queue
         if prompt_queue is None:
@@ -182,6 +217,7 @@ class ServerState:
         conversation_logger = ConversationLogger(self.transcription_config.log_dir, session_id)
         model_text_logger = ModelTextLogger(conversation_logger)
         session_transcriber: SessionTranscriber | None = None
+        self.set_active_conversation_log_path(conversation_logger.path)
         try:
             requested_voice_prompt_path = None
             voice_prompt_path = None
@@ -417,6 +453,7 @@ class ServerState:
             clog.log("info", "done with connection")
             return ws
         finally:
+            self.clear_active_conversation_log_path(conversation_logger.path)
             await model_text_logger.flush()
             if session_transcriber is not None:
                 await session_transcriber.close()
@@ -553,6 +590,53 @@ def main():
         help="Overlap between consecutive transcription chunks in seconds.",
     )
     parser.add_argument(
+        "--llm-log-watcher",
+        action="store_true",
+        help="Watch conversation logs, send them to an OpenAI model, and inject the result as a live prompt.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default="gpt-5.1-nano",
+        help="OpenAI model used by the conversation log watcher.",
+    )
+    parser.add_argument(
+        "--llm-system-prompt-file",
+        type=str,
+        default=str(Path(__file__).with_name("llm_sys_prompt.txt")),
+        help="Path to the text file used as the system prompt for the log watcher.",
+    )
+    parser.add_argument(
+        "--llm-trigger-mode",
+        choices=("user", "any"),
+        default="user",
+        help="Which new log lines should trigger an LLM call.",
+    )
+    parser.add_argument(
+        "--llm-payload-mode",
+        choices=("rolling", "full"),
+        default="rolling",
+        help="Whether to send a rolling log window or the full log file to the LLM.",
+    )
+    parser.add_argument(
+        "--llm-rolling-lines",
+        type=int,
+        default=15,
+        help="Number of latest tagged log lines to send when --llm-payload-mode rolling is used.",
+    )
+    parser.add_argument(
+        "--llm-injection-template",
+        type=str,
+        default="",
+        help="Optional wrapper template applied before live prompt injection. Use {prompt} as the placeholder.",
+    )
+    parser.add_argument(
+        "--llm-poll-seconds",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds for the conversation log watcher.",
+    )
+    parser.add_argument(
         "--voice-prompt-dir",
         type=str,
         help=(
@@ -575,6 +659,12 @@ def main():
         raise ValueError("--transcription-chunk-seconds must be > 0")
     if args.transcription_overlap_seconds < 0:
         raise ValueError("--transcription-overlap-seconds must be >= 0")
+    if args.llm_rolling_lines <= 0:
+        raise ValueError("--llm-rolling-lines must be > 0")
+    if args.llm_poll_seconds <= 0:
+        raise ValueError("--llm-poll-seconds must be > 0")
+    if args.llm_injection_template and "{prompt}" not in args.llm_injection_template:
+        raise ValueError("--llm-injection-template must include the {prompt} placeholder")
     args.voice_prompt_dir = _get_voice_prompt_dir(
         args.voice_prompt_dir,
         args.hf_repo,
@@ -596,6 +686,15 @@ def main():
             args.conversation_log_dir,
             args.transcription_chunk_seconds,
             args.transcription_overlap_seconds,
+        )
+    if args.llm_log_watcher:
+        logger.info(
+            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s payload=%s poll=%.2fs",
+            args.llm_model,
+            args.llm_system_prompt_file,
+            args.llm_trigger_mode,
+            args.llm_payload_mode,
+            args.llm_poll_seconds,
         )
 
     seed_all(42424242)
@@ -652,23 +751,43 @@ def main():
             overlap_seconds=args.transcription_overlap_seconds,
             log_dir=Path(args.conversation_log_dir),
         ),
+        llm_watcher_config=LLMWatcherConfig(
+            enabled=args.llm_log_watcher,
+            model=args.llm_model,
+            system_prompt_file=Path(args.llm_system_prompt_file),
+            trigger_mode=args.llm_trigger_mode,
+            payload_mode=args.llm_payload_mode,
+            rolling_lines=args.llm_rolling_lines,
+            injection_template=args.llm_injection_template,
+            poll_seconds=args.llm_poll_seconds,
+            log_dir=Path(args.conversation_log_dir),
+        ),
     )
+    if state.llm_watcher is not None:
+        state.llm_watcher.startup()
     logger.info("warming up the model")
     state.warmup()
     app = web.Application()
     app.router.add_get("/api/chat", state.handle_chat)
     stdin_task: Optional[asyncio.Task] = None
+    llm_watcher_task: Optional[asyncio.Task] = None
 
     async def on_startup(_app):
-        nonlocal stdin_task
+        nonlocal stdin_task, llm_watcher_task
         if args.live_prompt_stdin:
             stdin_task = asyncio.create_task(stdin_prompt_loop(state))
+        if state.llm_watcher is not None:
+            llm_watcher_task = asyncio.create_task(state.llm_watcher.run())
 
     async def on_cleanup(_app):
         if stdin_task is not None:
             stdin_task.cancel()
             with suppress(asyncio.CancelledError):
                 await stdin_task
+        if llm_watcher_task is not None:
+            llm_watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await llm_watcher_task
         if state.transcription_service is not None:
             state.transcription_service.shutdown()
 

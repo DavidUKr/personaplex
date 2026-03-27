@@ -117,6 +117,41 @@ Access the Web UI directly at https://11.54.401.33:8998
 
 When transcription is enabled, the server writes one UTF-8 log file per session with chronological tagged lines such as `[initial_prompt]`, `[user]`, `[model]`, and `[prompt]`. Live injected prompts are appended to that same per-session log when they are applied.
 
+#### LLM Log Watcher
+
+To watch the current session log, send the latest transcript context to OpenAI, print the result, and inject it back as a live prompt:
+```bash
+export OPENAI_API_KEY=<TOKEN>
+SSL_DIR=$(mktemp -d); python -m moshi.server \
+  --ssl "$SSL_DIR" \
+  --enable-transcription \
+  --live-prompt-stdin \
+  --llm-log-watcher
+```
+
+The watcher defaults to:
+
+- model `gpt-5.1-nano`
+- system prompt file [moshi/moshi/llm_sys_prompt.txt](/Users/davidkrinurs/projects/personaplex/moshi/moshi/llm_sys_prompt.txt)
+- trigger mode `user`, which calls the LLM only when new `[user]` transcription lines are appended
+- payload mode `rolling`, which sends the latest 15 tagged log lines
+- raw live prompt injection, unless `--llm-injection-template` is provided
+
+Useful options:
+
+- `--llm-system-prompt-file /path/to/prompt.txt`
+  - Overrides the default system prompt file.
+- `--llm-trigger-mode any`
+  - Calls the LLM after any newly appended tagged log line.
+- `--llm-payload-mode full`
+  - Sends the full conversation log instead of the latest rolling window.
+- `--llm-injection-template "NEW INFO: {prompt} END"`
+  - Wraps the LLM output before injecting it into the live session.
+- `--llm-poll-seconds 0.5`
+  - Changes how often the watcher polls the log directory.
+
+If no active session log is registered, the watcher falls back to the newest `.log` file in `--conversation-log-dir`. If it generates output while no session is active, the output is still printed but the live injection is dropped.
+
 ### Offline Evaluation
 
 For offline evaluation use the offline script that streams in an input wav file and produces an output wav file from the captured output stream. The output file will be the same duration as the input file.
