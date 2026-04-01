@@ -9,6 +9,13 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+def _should_include_log_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return not stripped.startswith("[prompt]")
+
+
 @dataclass
 class LLMWatcherConfig:
     enabled: bool = False
@@ -136,11 +143,16 @@ class OpenAILogPromptWatcher:
 
     async def _build_payload(self, log_path: Path) -> str:
         if self.config.payload_mode == "full":
-            return await asyncio.to_thread(log_path.read_text, encoding="utf-8")
+            def _read_full_text() -> str:
+                lines = log_path.read_text(encoding="utf-8").splitlines()
+                kept = [line for line in lines if _should_include_log_line(line)]
+                return "\n".join(kept)
+
+            return await asyncio.to_thread(_read_full_text)
 
         def _read_rolling_lines() -> str:
             lines = log_path.read_text(encoding="utf-8").splitlines()
-            kept = [line for line in lines if line.strip()]
+            kept = [line for line in lines if _should_include_log_line(line)]
             return "\n".join(kept[-self.config.rolling_lines :])
 
         return await asyncio.to_thread(_read_rolling_lines)
