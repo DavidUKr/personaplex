@@ -100,9 +100,9 @@ SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdi
 
 When enabled, each non-empty line typed into the same terminal is queued as a new prompt for the current active session. Once a prompt is queued, user audio is no longer fed to the model until the prompt is injected and live turn-taking resumes.
 
-By default, live prompts are appended to the session's existing text prompt. Use `--live-prompt-mode replace` to replace the current prompt instead:
+By default, live prompts replace the session's current text prompt. Use `--live-prompt-mode append` to keep appending each injected prompt to the existing prompt instead:
 ```bash
-SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-mode replace
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-mode append
 ```
 
 Live prompting can be combined with CPU offload if needed:
@@ -131,7 +131,7 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
 
 The watcher defaults to:
 
-- model `gpt-5.1-nano`
+- model `gpt-5-nano`
 - system prompt file [moshi/moshi/llm_sys_prompt.txt](/Users/davidkrinurs/projects/personaplex/moshi/moshi/llm_sys_prompt.txt)
 - trigger mode `user`, which calls the LLM only when new `[user]` transcription lines are appended
 - payload mode `rolling`, which sends the latest 15 tagged log lines
@@ -139,6 +139,8 @@ The watcher defaults to:
 
 Useful options:
 
+- `--llm-model gpt-5-nano`
+  - Sets which OpenAI model the watcher uses. This is the main flag to change if a model alias is unavailable in your account or if you want a different speed/cost/quality tradeoff.
 - `--llm-system-prompt-file /path/to/prompt.txt`
   - Overrides the default system prompt file.
 - `--llm-trigger-mode any`
@@ -149,6 +151,17 @@ Useful options:
   - Wraps the LLM output before injecting it into the live session.
 - `--llm-poll-seconds 0.5`
   - Changes how often the watcher polls the log directory.
+
+Example using a custom model:
+```bash
+export OPENAI_API_KEY=<TOKEN>
+SSL_DIR=$(mktemp -d); python -m moshi.server \
+  --ssl "$SSL_DIR" \
+  --enable-transcription \
+  --live-prompt-stdin \
+  --llm-log-watcher \
+  --llm-model gpt-5-mini
+```
 
 If no active session log is registered, the watcher falls back to the newest `.log` file in `--conversation-log-dir`. If it generates output while no session is active, the output is still printed but the live injection is dropped.
 

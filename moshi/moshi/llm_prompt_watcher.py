@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class LLMWatcherConfig:
     enabled: bool = False
-    model: str = "gpt-5.1-nano"
+    model: str = "gpt-5-nano"
     system_prompt_file: Path = Path(__file__).with_name("llm_sys_prompt.txt")
     trigger_mode: str = "user"
     payload_mode: str = "rolling"

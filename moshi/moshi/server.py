@@ -557,7 +557,7 @@ def main():
     parser.add_argument(
         "--live-prompt-mode",
         choices=("append", "replace"),
-        default="append",
+        default="replace",
         help="How stdin live prompts combine with the current session prompt.",
     )
     parser.add_argument(
@@ -597,7 +597,7 @@ def main():
     parser.add_argument(
         "--llm-model",
         type=str,
-        default="gpt-5.1-nano",
+        default="gpt-5-nano",
         help="OpenAI model used by the conversation log watcher.",
     )
     parser.add_argument(
