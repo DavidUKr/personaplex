@@ -103,6 +103,18 @@ def wrap_with_system_tags(text: str) -> str:
     return f"<system> {cleaned} <system>"
 
 
+def apply_live_prompt_prefix(text: str, prefix: str) -> str:
+    cleaned = text.strip()
+    normalized_prefix = prefix.strip()
+    if not cleaned:
+        return cleaned
+    if not normalized_prefix:
+        return cleaned
+    if cleaned.startswith(normalized_prefix):
+        return cleaned
+    return f"{normalized_prefix} {cleaned}"
+
+
 @dataclass
 class ServerState:
     mimi: MimiModel
@@ -117,6 +129,7 @@ class ServerState:
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
+                 live_prompt_prefix: str = "[SYSTEM PROMPT]:",
                  transcription_config: TranscriptionConfig | None = None,
                  llm_watcher_config: LLMWatcherConfig | None = None):
         self.mimi = mimi
@@ -125,6 +138,7 @@ class ServerState:
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
         self.live_prompt_mode = live_prompt_mode
+        self.live_prompt_prefix = live_prompt_prefix
         self.transcription_config = transcription_config or TranscriptionConfig()
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
@@ -317,10 +331,12 @@ class ServerState:
 
                 def inject_prompt(prompt_text: str):
                     nonlocal effective_prompt_text
-                    effective_prompt_text = build_effective_prompt(prompt_text)
+                    injected_prompt_text = apply_live_prompt_prefix(prompt_text, self.live_prompt_prefix)
+                    effective_prompt_text = build_effective_prompt(injected_prompt_text)
                     prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(effective_prompt_text))
                     self.lm_gen.step_text_prompt_tokens(prompt_tokens)
                     self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
+                    return injected_prompt_text
 
                 while True:
                     if close:
@@ -345,9 +361,9 @@ class ServerState:
                         if boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK or boundary_steps >= LIVE_PROMPT_MAX_STEPS:
                             for prompt_command in pending_prompt_commands:
                                 await model_text_logger.flush()
-                                inject_prompt(prompt_command.text)
-                                await conversation_logger.write_entry("prompt", prompt_command.text)
-                                clog.log("info", f"applied live prompt: {prompt_command.text}")
+                                injected_prompt_text = inject_prompt(prompt_command.text)
+                                await conversation_logger.write_entry("prompt", injected_prompt_text)
+                                clog.log("info", f"applied live prompt: {injected_prompt_text}")
                             pending_prompt_commands.clear()
                             prompt_interrupt_active = False
                             boundary_streak = 0
@@ -561,6 +577,12 @@ def main():
         help="How stdin live prompts combine with the current session prompt.",
     )
     parser.add_argument(
+        "--live-prompt-prefix",
+        type=str,
+        default="[SYSTEM PROMPT]:",
+        help="Prefix added to each injected live prompt before it is sent to the model.",
+    )
+    parser.add_argument(
         "--enable-transcription",
         action="store_true",
         help="Run background user speech-to-text transcription and persist per-session conversation logs.",
@@ -744,6 +766,7 @@ def main():
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
         live_prompt_mode=args.live_prompt_mode,
+        live_prompt_prefix=args.live_prompt_prefix,
         transcription_config=TranscriptionConfig(
             enabled=args.enable_transcription,
             model_id=args.transcription_model_id,

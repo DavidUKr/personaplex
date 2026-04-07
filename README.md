@@ -98,11 +98,16 @@ To inject new prompts during an active live session, start the server with `--li
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin
 ```
 
-When enabled, each non-empty line typed into the same terminal is queued as a new prompt for the current active session. Once a prompt is queued, user audio is no longer fed to the model until the prompt is injected and live turn-taking resumes.
+When enabled, each non-empty line typed into the same terminal is queued as a new prompt for the current active session. Before injection, the server prefixes each live prompt with `[SYSTEM PROMPT]:` by default so the model sees it as explicit system-style guidance rather than plain user text. Once a prompt is queued, user audio is no longer fed to the model until the prompt is injected and live turn-taking resumes.
 
 By default, live prompts replace the session's current text prompt. Use `--live-prompt-mode append` to keep appending each injected prompt to the existing prompt instead:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-mode append
+```
+
+To customize or disable that prefix, use `--live-prompt-prefix`:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-prefix "[SYSTEM PROMPT]:"
 ```
 
 Live prompting can be combined with CPU offload if needed:
