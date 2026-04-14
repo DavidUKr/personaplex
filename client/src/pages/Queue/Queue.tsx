@@ -7,6 +7,7 @@ import { Button } from "../../components/Button/Button";
 import { useModelParams } from "../Conversation/hooks/useModelParams";
 import { env } from "../../env";
 import { prewarmDecoderWorker } from "../../decoder/decoderWorker";
+import { DEFAULT_TEXT_PROMPT } from "../../prompts/defaultTextPrompt";
 
 const VOICE_OPTIONS = [
   "NATF0.pt", "NATF1.pt", "NATF2.pt", "NATF3.pt",
@@ -18,7 +19,7 @@ const VOICE_OPTIONS = [
 const TEXT_PROMPT_PRESETS = [
   {
     label: "Assistant (default)",
-    text: "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.",
+    text: DEFAULT_TEXT_PROMPT,
   },
   {
     label: "Medical office (service)",
