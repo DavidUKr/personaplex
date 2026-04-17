@@ -7,7 +7,6 @@ import { Button } from "../../components/Button/Button";
 import { useModelParams } from "../Conversation/hooks/useModelParams";
 import { env } from "../../env";
 import { prewarmDecoderWorker } from "../../decoder/decoderWorker";
-import { DEFAULT_TEXT_PROMPT } from "../../prompts/defaultTextPrompt";
 
 const VOICE_OPTIONS = [
   "NATF0.pt", "NATF1.pt", "NATF2.pt", "NATF3.pt",
@@ -17,10 +16,6 @@ const VOICE_OPTIONS = [
 ];
 
 const TEXT_PROMPT_PRESETS = [
-  {
-    label: "Assistant (default)",
-    text: DEFAULT_TEXT_PROMPT,
-  },
   {
     label: "Medical office (service)",
     text: "You work for Dr. Jones's medical office, and you are receiving calls to record information for new patients. Information: Record full name, date of birth, any medication allergies, tobacco smoking history, alcohol consumption history, and any prior medical conditions. Assure the patient that this information will be confidential, if they ask.",
@@ -39,6 +34,7 @@ interface HomepageProps {
   showMicrophoneAccessMessage: boolean;
   startConnection: () => Promise<void>;
   textPrompt: string;
+  defaultTextPrompt: string;
   setTextPrompt: (value: string) => void;
   voicePrompt: string;
   setVoicePrompt: (value: string) => void;
@@ -48,10 +44,19 @@ const Homepage = ({
   startConnection,
   showMicrophoneAccessMessage,
   textPrompt,
+  defaultTextPrompt,
   setTextPrompt,
   voicePrompt,
   setVoicePrompt,
 }: HomepageProps) => {
+  const textPromptPresets = [
+    {
+      label: "Assistant (default)",
+      text: defaultTextPrompt,
+    },
+    ...TEXT_PROMPT_PRESETS,
+  ];
+
   return (
     <div className="text-center h-screen w-screen p-4 flex flex-col items-center pt-8">
       <div className="mb-6">
@@ -69,7 +74,7 @@ const Homepage = ({
           <div className="border border-gray-300 rounded p-3 mb-3 bg-gray-50">
             <span className="text-xs font-medium text-gray-500 block mb-2">Examples:</span>
             <div className="flex flex-wrap gap-2 justify-center">
-              {TEXT_PROMPT_PRESETS.map((preset) => (
+              {textPromptPresets.map((preset) => (
                 <button
                   key={preset.label}
                   onClick={() => setTextPrompt(preset.text)}
@@ -207,6 +212,7 @@ export const Queue:FC = () => {
           startConnection={startConnection}
           showMicrophoneAccessMessage={showMicrophoneAccessMessage}
           textPrompt={modelParams.textPrompt}
+          defaultTextPrompt={modelParams.defaultTextPrompt}
           setTextPrompt={modelParams.setTextPrompt}
           voicePrompt={modelParams.voicePrompt}
           setVoicePrompt={modelParams.setVoicePrompt}
