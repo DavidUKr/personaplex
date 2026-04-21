@@ -70,6 +70,7 @@ LIVE_PROMPT_MAX_STEPS = 48
 @dataclass
 class PromptCommand:
     text: str
+    source: str = "manual"
 
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
     """Return a torch.device based on the requested string or availability."""
@@ -115,6 +116,22 @@ def apply_live_prompt_prefix(text: str, prefix: str) -> str:
     return f"{normalized_prefix} {cleaned}"
 
 
+def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
+    keyword = trigger_keyword.strip()
+    instruction = (
+        "If the user asks for factual or external information you do not have enough context to answer, "
+        f'say exactly "Let me check with {keyword}." '
+        "Then wait for new system information before answering. "
+        "Do not guess or invent facts while waiting."
+    )
+    cleaned_base_prompt = base_prompt.strip()
+    if not cleaned_base_prompt:
+        return instruction
+    if instruction in cleaned_base_prompt:
+        return cleaned_base_prompt
+    return f"{cleaned_base_prompt}\n{instruction}"
+
+
 @dataclass
 class ServerState:
     mimi: MimiModel
@@ -132,6 +149,7 @@ class ServerState:
                  live_prompt_prefix: str = "[SYSTEM PROMPT]:",
                  transcription_config: TranscriptionConfig | None = None,
                  llm_watcher_config: LLMWatcherConfig | None = None):
+        llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -156,16 +174,21 @@ class ServerState:
         self.active_prompt_queue: Optional[asyncio.Queue[PromptCommand]] = None
         self.active_conversation_log_path: Optional[Path] = None
         self.last_conversation_log_path: Optional[Path] = None
+        self._keyword_wait_active = False
+        self._keyword_wait_log_path: Optional[Path] = None
+        self._llm_trigger_mode = llm_watcher_config.trigger_mode
+        self._llm_trigger_keyword = llm_watcher_config.trigger_keyword
         self.transcription_service = None
         if self.transcription_config.enabled:
             self.transcription_service = TranscriptionService(self.transcription_config, self.device)
         self.llm_watcher = None
-        llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
         if llm_watcher_config.enabled:
             self.llm_watcher = OpenAILogPromptWatcher(
                 llm_watcher_config,
                 get_target_log_path=self.get_llm_target_log_path,
-                queue_live_prompt=self.queue_live_prompt,
+                queue_live_prompt=self.queue_live_prompt_with_source,
+                start_keyword_wait=self.start_keyword_wait,
+                cancel_keyword_wait=self.cancel_keyword_wait,
             )
     
     def warmup(self):
@@ -213,11 +236,44 @@ class ServerState:
         return max(candidates, key=lambda path: path.name)
 
     def queue_live_prompt(self, prompt_text: str) -> bool:
+        return self.queue_live_prompt_with_source(prompt_text, "manual")
+
+    def queue_live_prompt_with_source(self, prompt_text: str, source: str = "manual") -> bool:
         prompt_queue = self.active_prompt_queue
         if prompt_queue is None:
             return False
-        prompt_queue.put_nowait(PromptCommand(text=prompt_text))
+        prompt_queue.put_nowait(PromptCommand(text=prompt_text, source=source))
         return True
+
+    def start_keyword_wait(self, log_path: Path) -> bool:
+        if self._llm_trigger_mode != "keyword":
+            return False
+        if self.active_conversation_log_path != log_path:
+            return False
+        if self.active_prompt_queue is None:
+            return False
+        if self._keyword_wait_active:
+            return False
+        self._keyword_wait_active = True
+        self._keyword_wait_log_path = log_path
+        return True
+
+    def cancel_keyword_wait(self, log_path: Path) -> None:
+        if self._keyword_wait_log_path == log_path:
+            self._keyword_wait_active = False
+            self._keyword_wait_log_path = None
+
+    def finish_keyword_wait(self) -> None:
+        self._keyword_wait_active = False
+        self._keyword_wait_log_path = None
+
+    def is_keyword_wait_active(self) -> bool:
+        return self._keyword_wait_active
+
+    def get_transcription_tag(self) -> str:
+        if self._keyword_wait_active:
+            return "user ignored"
+        return "user"
 
 
     async def handle_chat(self, request):
@@ -229,7 +285,10 @@ class ServerState:
         clog.log("info", f"Incoming connection from {peer}:{peer_port}")
         session_id = uuid4().hex[:12]
         conversation_logger = ConversationLogger(self.transcription_config.log_dir, session_id)
-        model_text_logger = ModelTextLogger(conversation_logger)
+        flush_phrases = ()
+        if self._llm_trigger_mode == "keyword":
+            flush_phrases = (self._llm_trigger_keyword,)
+        model_text_logger = ModelTextLogger(conversation_logger, flush_phrases=flush_phrases)
         session_transcriber: SessionTranscriber | None = None
         self.set_active_conversation_log_path(conversation_logger.path)
         try:
@@ -252,6 +311,8 @@ class ServerState:
                     self.lm_gen.load_voice_prompt(voice_prompt_path)
 
             initial_text_prompt = request.query["text_prompt"].strip()
+            if self._llm_trigger_mode == "keyword":
+                initial_text_prompt = build_keyword_mode_prompt(initial_text_prompt, self._llm_trigger_keyword)
             self.lm_gen.text_prompt_tokens = (
                 self.text_tokenizer.encode(wrap_with_system_tags(initial_text_prompt))
                 if initial_text_prompt
@@ -363,12 +424,21 @@ class ServerState:
                                 await model_text_logger.flush()
                                 injected_prompt_text = inject_prompt(prompt_command.text)
                                 await conversation_logger.write_entry("prompt", injected_prompt_text)
+                                if prompt_command.source == "llm_keyword":
+                                    self.finish_keyword_wait()
                                 clog.log("info", f"applied live prompt: {injected_prompt_text}")
                             pending_prompt_commands.clear()
                             prompt_interrupt_active = False
                             boundary_streak = 0
                             boundary_steps = 0
                             all_pcm_data = None
+                        continue
+
+                    if self.is_keyword_wait_active():
+                        all_pcm_data = None
+                        pcm = opus_reader.read_pcm()
+                        if pcm.shape[-1] != 0 and session_transcriber is not None:
+                            session_transcriber.submit_pcm(pcm)
                         continue
 
                     pcm = opus_reader.read_pcm()
@@ -426,6 +496,7 @@ class ServerState:
                     session_transcriber = self.transcription_service.create_session(
                         conversation_logger=conversation_logger,
                         sample_rate=self.mimi.sample_rate,
+                        get_log_tag=self.get_transcription_tag,
                     )
                     session_transcriber.start()
 
@@ -465,10 +536,12 @@ class ServerState:
                         await ws.close()
                         clog.log("info", "session closed")
                     finally:
+                        self.finish_keyword_wait()
                         self.clear_active_prompt_queue(session_prompt_queue)
             clog.log("info", "done with connection")
             return ws
         finally:
+            self.finish_keyword_wait()
             self.clear_active_conversation_log_path(conversation_logger.path)
             await model_text_logger.flush()
             if session_transcriber is not None:
@@ -495,7 +568,7 @@ async def stdin_prompt_loop(state: ServerState):
         if not prompt_text:
             continue
 
-        if state.queue_live_prompt(prompt_text):
+        if state.queue_live_prompt_with_source(prompt_text, "manual"):
             logger.info(f"queued live prompt: {prompt_text}")
         else:
             logger.warning("ignored live prompt because no active session is running")
@@ -635,9 +708,15 @@ def main():
     )
     parser.add_argument(
         "--llm-trigger-mode",
-        choices=("user", "any"),
+        choices=("user", "any", "keyword"),
         default="user",
         help="Which new log lines should trigger an LLM call.",
+    )
+    parser.add_argument(
+        "--llm-trigger-keyword",
+        type=str,
+        default="my supervisor",
+        help="Case-insensitive phrase that triggers supervisor lookup in --llm-trigger-mode keyword.",
     )
     parser.add_argument(
         "--llm-payload-mode",
@@ -692,6 +771,8 @@ def main():
         raise ValueError("--llm-poll-seconds must be > 0")
     if args.llm_injection_template and "{prompt}" not in args.llm_injection_template:
         raise ValueError("--llm-injection-template must include the {prompt} placeholder")
+    if args.llm_trigger_mode == "keyword" and not args.llm_trigger_keyword.strip():
+        raise ValueError("--llm-trigger-keyword must not be empty when --llm-trigger-mode keyword is used")
     args.voice_prompt_dir = _get_voice_prompt_dir(
         args.voice_prompt_dir,
         args.hf_repo,
@@ -716,10 +797,11 @@ def main():
         )
     if args.llm_log_watcher:
         logger.info(
-            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s payload=%s poll=%.2fs",
+            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s keyword=%s payload=%s poll=%.2fs",
             args.llm_model,
             args.llm_system_prompt_file,
             args.llm_trigger_mode,
+            args.llm_trigger_keyword,
             args.llm_payload_mode,
             args.llm_poll_seconds,
         )
@@ -784,6 +866,7 @@ def main():
             model=args.llm_model,
             system_prompt_file=Path(args.llm_system_prompt_file),
             trigger_mode=args.llm_trigger_mode,
+            trigger_keyword=args.llm_trigger_keyword.strip(),
             payload_mode=args.llm_payload_mode,
             rolling_lines=args.llm_rolling_lines,
             injection_template=args.llm_injection_template,

@@ -94,6 +94,7 @@ Each conversation log is written in chronological order with one entry per line.
 
 - `[initial_prompt]` for the initial text prompt sent when the session starts
 - `[user]` for finalized speech-to-text segments from microphone input
+- `[user ignored]` for follow-up speech captured while PersonaPlex is waiting for supervisor help
 - `[model]` for generated assistant text grouped into readable segments
 - `[prompt]` for live prompts injected during an active session
 
@@ -150,6 +151,7 @@ The watcher defaults to:
 - model `gpt-5-nano`
 - system prompt file [moshi/moshi/llm_sys_prompt.txt](/Users/davidkrinurs/projects/personaplex/moshi/moshi/llm_sys_prompt.txt)
 - trigger mode `user`, which calls the LLM only when new `[user]` transcription lines are appended
+- trigger keyword `my supervisor`, used only in `--llm-trigger-mode keyword`
 - payload mode `rolling`, which sends the latest 15 tagged log lines
 - raw live prompt injection, unless `--llm-injection-template` is provided
 
@@ -161,6 +163,10 @@ Useful options:
   - Overrides the default system prompt file.
 - `--llm-trigger-mode any`
   - Calls the LLM after any newly appended tagged log line.
+- `--llm-trigger-mode keyword`
+  - Calls the LLM only after a `[model]` log line contains the configured supervisor phrase, then pauses PersonaPlex until the injected answer is applied.
+- `--llm-trigger-keyword "my supervisor"`
+  - Sets the case-insensitive supervisor phrase to watch for in `keyword` mode.
 - `--llm-payload-mode full`
   - Sends the full conversation log instead of the latest rolling window.
 - `--llm-injection-template "NEW INFO: {prompt} END"`
@@ -179,7 +185,20 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
   --llm-model gpt-5-mini
 ```
 
+Example using supervisor handoff mode:
+```bash
+export OPENAI_API_KEY=<TOKEN>
+SSL_DIR=$(mktemp -d); python -m moshi.server \
+  --ssl "$SSL_DIR" \
+  --enable-transcription \
+  --llm-log-watcher \
+  --llm-trigger-mode keyword \
+  --llm-trigger-keyword "my supervisor"
+```
+
 If no active session log is registered, the watcher falls back to the newest `.log` file in `--conversation-log-dir`. If it generates output while no session is active, the output is still printed but the live injection is dropped.
+
+In `keyword` mode, PersonaPlex should say the configured supervisor phrase when it needs outside context. After that phrase is logged, the watcher requests a supervisor answer, PersonaPlex stops consuming new user audio, and any continued user speech is transcribed as `[user ignored]` until the supervisor prompt is injected. Once the prompt is applied, normal turn-taking resumes.
 
 ### Offline Evaluation
 

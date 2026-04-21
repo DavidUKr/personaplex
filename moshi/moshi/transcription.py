@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -62,9 +62,14 @@ class ConversationLogger:
 
 
 class ModelTextLogger:
-    def __init__(self, conversation_logger: ConversationLogger):
+    def __init__(
+        self,
+        conversation_logger: ConversationLogger,
+        flush_phrases: tuple[str, ...] = (),
+    ):
         self.conversation_logger = conversation_logger
         self._buffer = ""
+        self._flush_phrases = tuple(phrase.lower() for phrase in flush_phrases if phrase.strip())
 
     async def append_piece(self, piece: str) -> None:
         self._buffer += piece
@@ -83,6 +88,11 @@ class ModelTextLogger:
         self._buffer = ""
 
     def _find_flush_index(self) -> Optional[int]:
+        lowered_buffer = self._buffer.lower()
+        for phrase in self._flush_phrases:
+            index = lowered_buffer.find(phrase)
+            if index != -1:
+                return len(self._buffer)
         for marker in ".?!\n":
             index = self._buffer.rfind(marker)
             if index != -1:
@@ -110,13 +120,19 @@ class TranscriptionService:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
         self._pipeline = self._load_pipeline()
 
-    def create_session(self, conversation_logger: ConversationLogger, sample_rate: int) -> "SessionTranscriber":
+    def create_session(
+        self,
+        conversation_logger: ConversationLogger,
+        sample_rate: int,
+        get_log_tag: Optional[Callable[[], str]] = None,
+    ) -> "SessionTranscriber":
         return SessionTranscriber(
             service=self,
             conversation_logger=conversation_logger,
             sample_rate=sample_rate,
             chunk_seconds=self.config.chunk_seconds,
             overlap_seconds=self.config.overlap_seconds,
+            get_log_tag=get_log_tag or (lambda: "user"),
         )
 
     def shutdown(self) -> None:
@@ -172,6 +188,7 @@ class SessionTranscriber:
         sample_rate: int,
         chunk_seconds: float,
         overlap_seconds: float,
+        get_log_tag: Callable[[], str],
     ):
         self.service = service
         self.conversation_logger = conversation_logger
@@ -183,6 +200,7 @@ class SessionTranscriber:
         self.task: Optional[asyncio.Task[None]] = None
         self._pending_audio = np.zeros((0,), dtype=np.float32)
         self._previous_window_text = ""
+        self._get_log_tag = get_log_tag
 
     def start(self) -> None:
         if self.task is None:
@@ -250,4 +268,4 @@ class SessionTranscriber:
         deduped = _sanitize_text(_drop_overlapping_prefix(self._previous_window_text, text))
         self._previous_window_text = text
         if deduped:
-            await self.conversation_logger.write_entry("user", deduped)
+            await self.conversation_logger.write_entry(self._get_log_tag(), deduped)
