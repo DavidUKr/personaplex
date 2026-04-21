@@ -1,5 +1,9 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {useLocalStorage} from './useLocalStorage';
+import {
+  DEFAULT_TEXT_PROMPT_FALLBACK,
+  loadDefaultTextPrompt,
+} from "../../../prompts/defaultTextPrompt";
 
 export const DEFAULT_TEXT_TEMPERATURE = 0.7;
 export const DEFAULT_TEXT_TOPK = 25;
@@ -8,7 +12,6 @@ export const DEFAULT_AUDIO_TOPK = 250;
 export const DEFAULT_PAD_MULT = 0;
 export const DEFAULT_REPETITION_PENALTY_CONTEXT = 64;
 export const DEFAULT_REPETITION_PENALTY = 1.0;
-export const DEFAULT_TEXT_PROMPT = "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.";
 export const DEFAULT_VOICE_PROMPT = "NATF0.pt";
 export const DEFAULT_RANDOM_SEED = -1;
 
@@ -28,6 +31,8 @@ export type ModelParamsValues = {
 type useModelParamsArgs = Partial<ModelParamsValues>;
 
 export const useModelParams = (params?:useModelParamsArgs) => {
+  const hasCustomTextPrompt = params?.textPrompt !== undefined;
+  const textPromptEditedRef = useRef(false);
 
   const [textTemperature, setTextTemperatureBase] = useState(params?.textTemperature || DEFAULT_TEXT_TEMPERATURE);
   const [textTopk, setTextTopkBase]= useState(params?.textTopk || DEFAULT_TEXT_TOPK);
@@ -36,11 +41,35 @@ export const useModelParams = (params?:useModelParamsArgs) => {
   const [padMult, setPadMultBase] = useState(params?.padMult || DEFAULT_PAD_MULT);
   const [repetitionPenalty, setRepetitionPenaltyBase] = useState(params?.repetitionPenalty || DEFAULT_REPETITION_PENALTY);
   const [repetitionPenaltyContext, setRepetitionPenaltyContextBase] = useState(params?.repetitionPenaltyContext || DEFAULT_REPETITION_PENALTY_CONTEXT);
-  const [textPrompt, setTextPromptBase] = useState(params?.textPrompt || DEFAULT_TEXT_PROMPT);
+  const [defaultTextPrompt, setDefaultTextPrompt] = useState(DEFAULT_TEXT_PROMPT_FALLBACK);
+  const [textPrompt, setTextPromptBase] = useState(params?.textPrompt || DEFAULT_TEXT_PROMPT_FALLBACK);
   const [voicePrompt, setVoicePromptBase] = useState(params?.voicePrompt || DEFAULT_VOICE_PROMPT);
   const [randomSeed, setRandomSeedBase] = useLocalStorage('randomSeed', params?.randomSeed || DEFAULT_RANDOM_SEED);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    loadDefaultTextPrompt()
+      .then((loadedPrompt) => {
+        if (cancelled) {
+          return;
+        }
+        setDefaultTextPrompt(loadedPrompt);
+        if (!hasCustomTextPrompt && !textPromptEditedRef.current) {
+          setTextPromptBase(loadedPrompt);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load default text prompt", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCustomTextPrompt]);
+
   const resetParams = useCallback(() => {
+    textPromptEditedRef.current = false;
     setTextTemperatureBase(DEFAULT_TEXT_TEMPERATURE);
     setTextTopkBase(DEFAULT_TEXT_TOPK);
     setAudioTemperatureBase(DEFAULT_AUDIO_TEMPERATURE);
@@ -48,6 +77,7 @@ export const useModelParams = (params?:useModelParamsArgs) => {
     setPadMultBase(DEFAULT_PAD_MULT);
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
     setRepetitionPenaltyContext(DEFAULT_REPETITION_PENALTY_CONTEXT);
+    setTextPromptBase(defaultTextPrompt);
   }, [
     setTextTemperatureBase,
     setTextTopkBase,
@@ -56,9 +86,11 @@ export const useModelParams = (params?:useModelParamsArgs) => {
     setPadMultBase,
     setRepetitionPenaltyBase,
     setRepetitionPenaltyContextBase,
+    defaultTextPrompt,
   ]);
 
   const setParams = useCallback((params: ModelParamsValues) => {
+    textPromptEditedRef.current = true;
     setTextTemperatureBase(params.textTemperature);
     setTextTopkBase(params.textTopk);
     setAudioTemperatureBase(params.audioTemperature);
@@ -118,6 +150,7 @@ export const useModelParams = (params?:useModelParamsArgs) => {
     }
   }, []);
   const setTextPrompt = useCallback((value: string) => {
+    textPromptEditedRef.current = true;
     setTextPromptBase(value);
   }, []);
   const setVoicePrompt = useCallback((value: string) => {
@@ -144,6 +177,7 @@ export const useModelParams = (params?:useModelParamsArgs) => {
     setRepetitionPenaltyContext,
     setTextPrompt,
     textPrompt,
+    defaultTextPrompt,
     setVoicePrompt,
     voicePrompt,
     resetParams,
