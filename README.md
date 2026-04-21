@@ -61,6 +61,17 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
   --conversation-log-dir "./logs/conversations"
 ```
 
+To test the back llm functionalities, here is a good starting point:
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server 
+  --ssl "$SSL_DIR" 
+  --live-prompt-stdin 
+  --enable-transcription 
+  --llm-log-watcher 
+  --llm-poll-seconds 2 
+  --llm-model gpt-5
+```
+
 Transcription-related server options and defaults:
 
 - `--enable-transcription`
