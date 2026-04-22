@@ -119,9 +119,9 @@ def apply_live_prompt_prefix(text: str, prefix: str) -> str:
 def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     keyword = trigger_keyword.strip()
     instruction = (
-        "If the user asks for factual or external information you do not have enough context to answer, "
+        "If the user asks a question, "
         f'say exactly "Let me check with {keyword}." '
-        "Then wait for new system information before answering. "
+        f"Then wait for new system information before answering. You will receive [SYSTEM PROMPT]."
         "Do not guess or invent facts while waiting."
     )
     cleaned_base_prompt = base_prompt.strip()
