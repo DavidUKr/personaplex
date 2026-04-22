@@ -65,6 +65,7 @@ TEXT_TOKEN_EOS = 2
 TEXT_TOKEN_PAD = 3
 LIVE_PROMPT_BOUNDARY_STREAK = 2
 LIVE_PROMPT_MAX_STEPS = 48
+WS_KEEPALIVE_SECONDS = 2.0
 
 
 @dataclass
@@ -277,7 +278,7 @@ class ServerState:
 
 
     async def handle_chat(self, request):
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
         clog = ColorizedLog.randomize()
         peer = request.remote  # IP
@@ -346,6 +347,9 @@ class ServerState:
                             opus_reader.append_bytes(payload_message[1:])
                         else:
                             clog.log("warning", f"unknown message kind {kind}")
+                except asyncio.CancelledError:
+                    clog.log("info", "recv loop cancelled")
+                    raise
                 finally:
                     close = True
                     clog.log("info", "connection closed")
@@ -469,6 +473,7 @@ class ServerState:
                             break
 
             async def send_loop():
+                last_send_at = asyncio.get_running_loop().time()
                 while True:
                     if close:
                         return
@@ -476,6 +481,12 @@ class ServerState:
                     msg = opus_writer.read_bytes()
                     if len(msg) > 0:
                         await ws.send_bytes(b"\x01" + msg)
+                        last_send_at = asyncio.get_running_loop().time()
+                        continue
+                    now = asyncio.get_running_loop().time()
+                    if now - last_send_at >= WS_KEEPALIVE_SECONDS:
+                        await ws.send_bytes(b"\x06")
+                        last_send_at = now
 
             clog.log("info", "accepted connection")
             if initial_text_prompt:
@@ -527,6 +538,11 @@ class ServerState:
                             asyncio.create_task(send_loop()),
                         ]
                         _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        for task in _done:
+                            with suppress(asyncio.CancelledError):
+                                exc = task.exception()
+                                if exc is not None:
+                                    logger.error("session task failed: %s", exc)
                         for task in pending:
                             task.cancel()
                             try:
