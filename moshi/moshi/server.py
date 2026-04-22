@@ -28,6 +28,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from contextlib import suppress
+import json
 import random
 import os
 from pathlib import Path
@@ -66,6 +67,7 @@ TEXT_TOKEN_PAD = 3
 LIVE_PROMPT_BOUNDARY_STREAK = 2
 LIVE_PROMPT_MAX_STEPS = 48
 WS_KEEPALIVE_SECONDS = 2.0
+INITIAL_METADATA_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass
@@ -131,6 +133,27 @@ def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     if instruction in cleaned_base_prompt:
         return cleaned_base_prompt
     return f"{cleaned_base_prompt}\n{instruction}"
+
+
+async def read_initial_metadata(ws: web.WebSocketResponse) -> dict[str, object]:
+    try:
+        message = await asyncio.wait_for(ws.receive(), timeout=INITIAL_METADATA_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return {}
+
+    if message.type != aiohttp.WSMsgType.BINARY or not isinstance(message.data, bytes) or len(message.data) == 0:
+        return {}
+
+    if message.data[0] != 4:
+        return {}
+
+    try:
+        payload = json.loads(message.data[1:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
 
 @dataclass
@@ -293,6 +316,7 @@ class ServerState:
         session_transcriber: SessionTranscriber | None = None
         self.set_active_conversation_log_path(conversation_logger.path)
         try:
+            initial_metadata = await read_initial_metadata(ws)
             requested_voice_prompt_path = None
             voice_prompt_path = None
             if self.voice_prompt_dir is not None:
@@ -311,7 +335,11 @@ class ServerState:
                 else:
                     self.lm_gen.load_voice_prompt(voice_prompt_path)
 
-            initial_text_prompt = request.query["text_prompt"].strip()
+            initial_text_prompt_value = initial_metadata.get("text_prompt")
+            if isinstance(initial_text_prompt_value, str):
+                initial_text_prompt = initial_text_prompt_value.strip()
+            else:
+                initial_text_prompt = request.query.get("text_prompt", "").strip()
             if self._llm_trigger_mode == "keyword":
                 initial_text_prompt = build_keyword_mode_prompt(initial_text_prompt, self._llm_trigger_keyword)
             self.lm_gen.text_prompt_tokens = (

@@ -69,7 +69,6 @@ const buildURL = ({
   url.searchParams.append("audio_seed", audioSeed.toString());
   url.searchParams.append("repetition_penalty_context", params.repetitionPenaltyContext.toString());
   url.searchParams.append("repetition_penalty", params.repetitionPenalty.toString());
-  url.searchParams.append("text_prompt", params.textPrompt.toString());
   url.searchParams.append("voice_prompt", params.voicePrompt.toString());
   console.log(url.toString());
   return url.toString();
@@ -112,6 +111,14 @@ export const Conversation:FC<ConversationProps> = ({
   const textContainerRef = useRef<HTMLDivElement>(null);
   const textSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
   const audioSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
+  const initialSocketMessages = useMemo(() => [
+    {
+      type: "metadata" as const,
+      data: {
+        text_prompt: modelParams.textPrompt.toString(),
+      },
+    },
+  ], [modelParams.textPrompt]);
 
   const WSURL = buildURL({
     workerAddr,
@@ -132,6 +139,7 @@ export const Conversation:FC<ConversationProps> = ({
     // onMessage,
     uri: WSURL,
     onDisconnect,
+    initialMessages: initialSocketMessages,
   });
   useEffect(() => {
     audioRecorder.current.ondataavailable = (e) => {

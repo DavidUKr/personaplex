@@ -6,10 +6,12 @@ export const useSocket = ({
   onMessage,
   uri,
   onDisconnect: onDisconnectProp,
+  initialMessages = [],
 }: {
   onMessage?: (message: WSMessage) => void;
   uri: string;
   onDisconnect?: () => void;
+  initialMessages?: WSMessage[];
 }) => {
   const socketRef = useRef<WebSocket | null>(null); // useRef to keep stable socket reference
   const [socketStatus, setSocketStatus] = useState<SocketStatus>("disconnected");
@@ -28,7 +30,12 @@ export const useSocket = ({
   const onConnect = useCallback(() => {
     console.log("connected, now waiting for handshake.");
     setSocketStatus("connecting");
-  }, [setSocketStatus]);
+    if (socketRef.current) {
+      for (const message of initialMessages) {
+        socketRef.current.send(encodeMessage(message));
+      }
+    }
+  }, [initialMessages, setSocketStatus]);
 
   const onDisconnect = useCallback((event: CloseEvent) => {
     const closedSocket = event.target as WebSocket;
