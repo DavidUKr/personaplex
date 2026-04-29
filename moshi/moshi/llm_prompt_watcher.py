@@ -22,6 +22,7 @@ class LLMWatcherConfig:
     model: str = "gpt-5-nano"
     system_prompt_file: Path = Path(__file__).with_name("llm_sys_prompt.txt")
     trigger_mode: str = "user"
+    trigger_keyword: str = "my supervisor"
     payload_mode: str = "rolling"
     rolling_lines: int = 15
     injection_template: str = ""
@@ -40,11 +41,15 @@ class OpenAILogPromptWatcher:
         self,
         config: LLMWatcherConfig,
         get_target_log_path: Callable[[], Optional[Path]],
-        queue_live_prompt: Callable[[str], bool],
+        queue_live_prompt: Callable[[str, str], bool],
+        start_keyword_wait: Callable[[Path], bool],
+        cancel_keyword_wait: Callable[[Path], None],
     ):
         self.config = config
         self.get_target_log_path = get_target_log_path
         self.queue_live_prompt = queue_live_prompt
+        self.start_keyword_wait = start_keyword_wait
+        self.cancel_keyword_wait = cancel_keyword_wait
         self._states: dict[Path, _LogReadState] = {}
         self._client = None
         self._system_prompt = ""
@@ -56,6 +61,8 @@ class OpenAILogPromptWatcher:
             raise ValueError("--llm-rolling-lines must be > 0")
         if self.config.poll_seconds <= 0:
             raise ValueError("--llm-poll-seconds must be > 0")
+        if self.config.trigger_mode == "keyword" and not self.config.trigger_keyword.strip():
+            raise ValueError("--llm-trigger-keyword must not be empty when --llm-trigger-mode keyword is used")
 
         try:
             from openai import OpenAI
@@ -125,21 +132,37 @@ class OpenAILogPromptWatcher:
             return
         if self.config.trigger_mode == "user" and not any(line.startswith("[user]") for line in new_lines):
             return
+        if self.config.trigger_mode == "keyword":
+            keyword_triggered = any(
+                line.startswith("[model]") and self.config.trigger_keyword.strip().lower() in line.lower()
+                for line in new_lines
+            )
+            if not keyword_triggered:
+                return
+            if not self.start_keyword_wait(log_path):
+                return
 
         payload = await self._build_payload(log_path)
         if not payload:
+            if self.config.trigger_mode == "keyword":
+                self.cancel_keyword_wait(log_path)
             return
         llm_output = (await self._generate_prompt(payload)).strip()
         if not llm_output:
             logger.warning("llm log watcher returned empty output; skipping injection")
+            if self.config.trigger_mode == "keyword":
+                self.cancel_keyword_wait(log_path)
             return
 
         logger.info("llm log watcher output: %s", llm_output)
         injection_text = self._format_injection_text(llm_output)
-        if self.queue_live_prompt(injection_text):
+        prompt_source = "llm_keyword" if self.config.trigger_mode == "keyword" else "llm_watcher"
+        if self.queue_live_prompt(injection_text, prompt_source):
             logger.info("queued llm-generated live prompt")
         else:
             logger.warning("generated llm prompt but no active session is running; dropping injection")
+            if self.config.trigger_mode == "keyword":
+                self.cancel_keyword_wait(log_path)
 
     async def _build_payload(self, log_path: Path) -> str:
         if self.config.payload_mode == "full":
@@ -162,12 +185,20 @@ class OpenAILogPromptWatcher:
             raise RuntimeError("OpenAI client is not initialized.")
 
         def _request() -> str:
+            system_prompt = self._system_prompt
+            if self.config.trigger_mode == "keyword":
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    f'The handoff keyword is "{self.config.trigger_keyword.strip()}". '
+                    "When that phrase appears in a [model] line, answer the user's unresolved question "
+                    "using the transcript context, including any [user ignored] follow-up lines."
+                )
             response = self._client.responses.create(
                 model=self.config.model,
                 input=[
                     {
                         "role": "system",
-                        "content": [{"type": "input_text", "text": self._system_prompt}],
+                        "content": [{"type": "input_text", "text": system_prompt}],
                     },
                     {
                         "role": "user",

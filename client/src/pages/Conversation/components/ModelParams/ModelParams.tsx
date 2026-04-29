@@ -1,4 +1,4 @@
-import { FC, RefObject, useState } from "react";
+import { FC, RefObject, useEffect, useState } from "react";
 import { useModelParams } from "../../hooks/useModelParams";
 import { Button } from "../../../../components/Button/Button";
 
@@ -24,14 +24,32 @@ export const ModelParams:FC<ModelParamsProps> = ({
 }) => {
   const [modalVoicePrompt, setModalVoicePrompt] = useState<string>(voicePrompt);
   const [modalTextPrompt, setModalTextPrompt] = useState<string>(textPrompt);
+
+  useEffect(() => {
+    setModalTextPrompt(textPrompt);
+  }, [textPrompt]);
+
+  useEffect(() => {
+    setModalVoicePrompt(voicePrompt);
+  }, [voicePrompt]);
+
   return (
     <div className=" p-2 mt-6 self-center flex flex-col items-center text-center">
         <table>
           <tbody>
             <tr>
               <td>Text Prompt:</td>
-              <td className="w-12 text-center">{modalTextPrompt}</td>
-              <td className="p-2"><input className="align-middle bg-white text-black border border-gray-300 rounded px-2 py-1" disabled={isConnected} type="text" id="text-prompt" name="text-prompt" value={modalTextPrompt} onChange={e => setModalTextPrompt(e.target.value)} /></td>
+              <td className="w-12 text-center align-top">{modalTextPrompt}</td>
+              <td className="p-2">
+                <textarea
+                  className="align-middle bg-white text-black border border-gray-300 rounded px-2 py-1 min-h-48 min-w-96"
+                  disabled={isConnected}
+                  id="text-prompt"
+                  name="text-prompt"
+                  value={modalTextPrompt}
+                  onChange={e => setModalTextPrompt(e.target.value)}
+                />
+              </td>
             </tr>
             <tr>
               <td>Voice Prompt:</td>

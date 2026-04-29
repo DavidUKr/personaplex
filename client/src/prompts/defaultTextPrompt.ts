@@ -2,9 +2,10 @@ export const DEFAULT_TEXT_PROMPT_PATH = "/default-text-prompt.txt";
 
 export const DEFAULT_TEXT_PROMPT_FALLBACK =
   "You are a customer support agent. Help users clearly, politely, and efficiently. " +
-  "Every time the user asks a factual question, do not answer immediately. " +
-  "Wait for new system information first, then answer using that information. " +
-  "Do not guess or rely on memory for factual claims.";
+  "If the user asks for factual or external information you do not have enough context to answer, " +
+  "say exactly \"Let me check with my supervisor.\" " +
+  "Then wait for new system information before answering, and answer using that information once it arrives. " +
+  "Do not guess or rely on memory for factual claims while waiting.";
 
 export const normalizePromptText = (value: string) => value.replace(/\s+/g, " ").trim();
 

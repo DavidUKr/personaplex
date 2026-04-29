@@ -28,6 +28,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from contextlib import suppress
+import json
 import random
 import os
 from pathlib import Path
@@ -65,11 +66,65 @@ TEXT_TOKEN_EOS = 2
 TEXT_TOKEN_PAD = 3
 LIVE_PROMPT_BOUNDARY_STREAK = 2
 LIVE_PROMPT_MAX_STEPS = 48
+WS_KEEPALIVE_SECONDS = 2.0
+INITIAL_METADATA_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass
 class PromptCommand:
     text: str
+    source: str = "manual"
+
+
+@dataclass(frozen=True)
+class SamplingConfig:
+    profile: str
+    temp_text: float
+    topk_text: int
+    temp_audio: float
+    topk_audio: int
+    seed: int
+    greedy: bool
+
+
+PROFILE_PRESETS: dict[str, SamplingConfig] = {
+    "def": SamplingConfig(
+        profile="def",
+        temp_text=0.7,
+        topk_text=25,
+        temp_audio=0.8,
+        topk_audio=250,
+        seed=-1,
+        greedy=False,
+    ),
+    "pred": SamplingConfig(
+        profile="pred",
+        temp_text=0.55,
+        topk_text=20,
+        temp_audio=0.65,
+        topk_audio=115,
+        seed=1234,
+        greedy=False,
+    ),
+    "cons": SamplingConfig(
+        profile="cons",
+        temp_text=0.4,
+        topk_text=10,
+        temp_audio=0.5,
+        topk_audio=50,
+        seed=1234,
+        greedy=False,
+    ),
+    "det": SamplingConfig(
+        profile="det",
+        temp_text=0.7,
+        topk_text=25,
+        temp_audio=0.8,
+        topk_audio=250,
+        seed=1234,
+        greedy=True,
+    ),
+}
 
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
     """Return a torch.device based on the requested string or availability."""
@@ -91,6 +146,29 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = False
+
+
+def _parse_query_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def _validate_sampling_config(sampling_config: SamplingConfig) -> SamplingConfig:
+    if sampling_config.temp_text < 0.0:
+        raise ValueError("text temperature must be >= 0")
+    if sampling_config.temp_audio < 0.0:
+        raise ValueError("audio temperature must be >= 0")
+    if sampling_config.topk_text < 0:
+        raise ValueError("text top-k must be >= 0")
+    if sampling_config.topk_audio < 0:
+        raise ValueError("audio top-k must be >= 0")
+    return sampling_config
 
 
 def wrap_with_system_tags(text: str) -> str:
@@ -115,6 +193,44 @@ def apply_live_prompt_prefix(text: str, prefix: str) -> str:
     return f"{normalized_prefix} {cleaned}"
 
 
+def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
+    keyword = trigger_keyword.strip()
+    instruction = (
+        "If the user asks a question, "
+        f'say exactly "Let me check with {keyword}." '
+        f"Then wait for new system information before answering. You will receive [SYSTEM PROMPT]."
+        "Do not guess or invent facts while waiting."
+        f"Only ask for {keyword} when the user asks a question."
+    )
+    cleaned_base_prompt = base_prompt.strip()
+    if not cleaned_base_prompt:
+        return instruction
+    if instruction in cleaned_base_prompt:
+        return cleaned_base_prompt
+    return f"{cleaned_base_prompt}\n{instruction}"
+
+
+async def read_initial_metadata(ws: web.WebSocketResponse) -> dict[str, object]:
+    try:
+        message = await asyncio.wait_for(ws.receive(), timeout=INITIAL_METADATA_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return {}
+
+    if message.type != aiohttp.WSMsgType.BINARY or not isinstance(message.data, bytes) or len(message.data) == 0:
+        return {}
+
+    if message.data[0] != 4:
+        return {}
+
+    try:
+        payload = json.loads(message.data[1:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
 @dataclass
 class ServerState:
     mimi: MimiModel
@@ -130,8 +246,11 @@ class ServerState:
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
                  live_prompt_prefix: str = "[SYSTEM PROMPT]:",
+                 sampling_config: SamplingConfig | None = None,
+                 session_params_override: bool = False,
                  transcription_config: TranscriptionConfig | None = None,
                  llm_watcher_config: LLMWatcherConfig | None = None):
+        llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -139,6 +258,8 @@ class ServerState:
         self.voice_prompt_dir = voice_prompt_dir
         self.live_prompt_mode = live_prompt_mode
         self.live_prompt_prefix = live_prompt_prefix
+        self.sampling_config = sampling_config or PROFILE_PRESETS["def"]
+        self.session_params_override = session_params_override
         self.transcription_config = transcription_config or TranscriptionConfig()
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
@@ -148,6 +269,7 @@ class ServerState:
                             frame_rate=self.mimi.frame_rate,
                             save_voice_prompt_embeddings=save_voice_prompt_embeddings,
         )
+        self.apply_sampling_config(self.sampling_config)
         
         self.lock = asyncio.Lock()
         self.mimi.streaming_forever(1)
@@ -156,17 +278,50 @@ class ServerState:
         self.active_prompt_queue: Optional[asyncio.Queue[PromptCommand]] = None
         self.active_conversation_log_path: Optional[Path] = None
         self.last_conversation_log_path: Optional[Path] = None
+        self._keyword_wait_active = False
+        self._keyword_wait_log_path: Optional[Path] = None
+        self._llm_trigger_mode = llm_watcher_config.trigger_mode
+        self._llm_trigger_keyword = llm_watcher_config.trigger_keyword
         self.transcription_service = None
         if self.transcription_config.enabled:
             self.transcription_service = TranscriptionService(self.transcription_config, self.device)
         self.llm_watcher = None
-        llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
         if llm_watcher_config.enabled:
             self.llm_watcher = OpenAILogPromptWatcher(
                 llm_watcher_config,
                 get_target_log_path=self.get_llm_target_log_path,
-                queue_live_prompt=self.queue_live_prompt,
+                queue_live_prompt=self.queue_live_prompt_with_source,
+                start_keyword_wait=self.start_keyword_wait,
+                cancel_keyword_wait=self.cancel_keyword_wait,
             )
+
+    def apply_sampling_config(self, sampling_config: SamplingConfig) -> None:
+        self.lm_gen.use_sampling = not sampling_config.greedy
+        self.lm_gen.temp = sampling_config.temp_audio
+        self.lm_gen.temp_text = sampling_config.temp_text
+        self.lm_gen.top_k = sampling_config.topk_audio
+        self.lm_gen.top_k_text = sampling_config.topk_text
+
+    def resolve_session_sampling_config(self, request: web.Request) -> SamplingConfig:
+        if not self.session_params_override:
+            return self.sampling_config
+
+        query = request.query
+        temp_text = float(query.get("text_temperature", self.sampling_config.temp_text))
+        topk_text = int(query.get("text_topk", self.sampling_config.topk_text))
+        temp_audio = float(query.get("audio_temperature", self.sampling_config.temp_audio))
+        topk_audio = int(query.get("audio_topk", self.sampling_config.topk_audio))
+        seed = int(query.get("seed", self.sampling_config.seed))
+        greedy = _parse_query_bool(query.get("greedy"))
+        return _validate_sampling_config(SamplingConfig(
+            profile=self.sampling_config.profile,
+            temp_text=temp_text,
+            topk_text=topk_text,
+            temp_audio=temp_audio,
+            topk_audio=topk_audio,
+            seed=seed,
+            greedy=self.sampling_config.greedy if greedy is None else greedy,
+        ))
     
     def warmup(self):
         for _ in range(4):
@@ -213,15 +368,48 @@ class ServerState:
         return max(candidates, key=lambda path: path.name)
 
     def queue_live_prompt(self, prompt_text: str) -> bool:
+        return self.queue_live_prompt_with_source(prompt_text, "manual")
+
+    def queue_live_prompt_with_source(self, prompt_text: str, source: str = "manual") -> bool:
         prompt_queue = self.active_prompt_queue
         if prompt_queue is None:
             return False
-        prompt_queue.put_nowait(PromptCommand(text=prompt_text))
+        prompt_queue.put_nowait(PromptCommand(text=prompt_text, source=source))
         return True
+
+    def start_keyword_wait(self, log_path: Path) -> bool:
+        if self._llm_trigger_mode != "keyword":
+            return False
+        if self.active_conversation_log_path != log_path:
+            return False
+        if self.active_prompt_queue is None:
+            return False
+        if self._keyword_wait_active:
+            return False
+        self._keyword_wait_active = True
+        self._keyword_wait_log_path = log_path
+        return True
+
+    def cancel_keyword_wait(self, log_path: Path) -> None:
+        if self._keyword_wait_log_path == log_path:
+            self._keyword_wait_active = False
+            self._keyword_wait_log_path = None
+
+    def finish_keyword_wait(self) -> None:
+        self._keyword_wait_active = False
+        self._keyword_wait_log_path = None
+
+    def is_keyword_wait_active(self) -> bool:
+        return self._keyword_wait_active
+
+    def get_transcription_tag(self) -> str:
+        if self._keyword_wait_active:
+            return "user ignored"
+        return "user"
 
 
     async def handle_chat(self, request):
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
         clog = ColorizedLog.randomize()
         peer = request.remote  # IP
@@ -229,10 +417,14 @@ class ServerState:
         clog.log("info", f"Incoming connection from {peer}:{peer_port}")
         session_id = uuid4().hex[:12]
         conversation_logger = ConversationLogger(self.transcription_config.log_dir, session_id)
-        model_text_logger = ModelTextLogger(conversation_logger)
+        flush_phrases = ()
+        if self._llm_trigger_mode == "keyword":
+            flush_phrases = (self._llm_trigger_keyword,)
+        model_text_logger = ModelTextLogger(conversation_logger, flush_phrases=flush_phrases)
         session_transcriber: SessionTranscriber | None = None
         self.set_active_conversation_log_path(conversation_logger.path)
         try:
+            initial_metadata = await read_initial_metadata(ws)
             requested_voice_prompt_path = None
             voice_prompt_path = None
             if self.voice_prompt_dir is not None:
@@ -251,13 +443,20 @@ class ServerState:
                 else:
                     self.lm_gen.load_voice_prompt(voice_prompt_path)
 
-            initial_text_prompt = request.query["text_prompt"].strip()
+            initial_text_prompt_value = initial_metadata.get("text_prompt")
+            if isinstance(initial_text_prompt_value, str):
+                initial_text_prompt = initial_text_prompt_value.strip()
+            else:
+                initial_text_prompt = request.query.get("text_prompt", "").strip()
+            if self._llm_trigger_mode == "keyword":
+                initial_text_prompt = build_keyword_mode_prompt(initial_text_prompt, self._llm_trigger_keyword)
             self.lm_gen.text_prompt_tokens = (
                 self.text_tokenizer.encode(wrap_with_system_tags(initial_text_prompt))
                 if initial_text_prompt
                 else None
             )
-            seed = int(request.query["seed"]) if "seed" in request.query else None
+            session_sampling = self.resolve_session_sampling_config(request)
+            seed = session_sampling.seed
             session_prompt_queue: asyncio.Queue[PromptCommand] = asyncio.Queue()
             await conversation_logger.write_entry("initial_prompt", initial_text_prompt)
 
@@ -285,6 +484,9 @@ class ServerState:
                             opus_reader.append_bytes(payload_message[1:])
                         else:
                             clog.log("warning", f"unknown message kind {kind}")
+                except asyncio.CancelledError:
+                    clog.log("info", "recv loop cancelled")
+                    raise
                 finally:
                     close = True
                     clog.log("info", "connection closed")
@@ -363,12 +565,21 @@ class ServerState:
                                 await model_text_logger.flush()
                                 injected_prompt_text = inject_prompt(prompt_command.text)
                                 await conversation_logger.write_entry("prompt", injected_prompt_text)
+                                if prompt_command.source == "llm_keyword":
+                                    self.finish_keyword_wait()
                                 clog.log("info", f"applied live prompt: {injected_prompt_text}")
                             pending_prompt_commands.clear()
                             prompt_interrupt_active = False
                             boundary_streak = 0
                             boundary_steps = 0
                             all_pcm_data = None
+                        continue
+
+                    if self.is_keyword_wait_active():
+                        all_pcm_data = None
+                        pcm = opus_reader.read_pcm()
+                        if pcm.shape[-1] != 0 and session_transcriber is not None:
+                            session_transcriber.submit_pcm(pcm)
                         continue
 
                     pcm = opus_reader.read_pcm()
@@ -399,6 +610,7 @@ class ServerState:
                             break
 
             async def send_loop():
+                last_send_at = asyncio.get_running_loop().time()
                 while True:
                     if close:
                         return
@@ -406,14 +618,33 @@ class ServerState:
                     msg = opus_writer.read_bytes()
                     if len(msg) > 0:
                         await ws.send_bytes(b"\x01" + msg)
+                        last_send_at = asyncio.get_running_loop().time()
+                        continue
+                    now = asyncio.get_running_loop().time()
+                    if now - last_send_at >= WS_KEEPALIVE_SECONDS:
+                        await ws.send_bytes(b"\x06")
+                        last_send_at = now
 
             clog.log("info", "accepted connection")
             if initial_text_prompt:
                 clog.log("info", f"text prompt: {initial_text_prompt}")
             if len(request.query["voice_prompt"]) > 0:
                 clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
+            clog.log(
+                "info",
+                (
+                    f"sampling profile={session_sampling.profile} "
+                    f"temp_text={session_sampling.temp_text:.2f} "
+                    f"topk_text={session_sampling.topk_text} "
+                    f"temp_audio={session_sampling.temp_audio:.2f} "
+                    f"topk_audio={session_sampling.topk_audio} "
+                    f"seed={session_sampling.seed} "
+                    f"greedy={session_sampling.greedy}"
+                ),
+            )
             close = False
             async with self.lock:
+                self.apply_sampling_config(session_sampling)
                 if seed is not None and seed != -1:
                     seed_all(seed)
 
@@ -426,6 +657,7 @@ class ServerState:
                     session_transcriber = self.transcription_service.create_session(
                         conversation_logger=conversation_logger,
                         sample_rate=self.mimi.sample_rate,
+                        get_log_tag=self.get_transcription_tag,
                     )
                     session_transcriber.start()
 
@@ -456,6 +688,11 @@ class ServerState:
                             asyncio.create_task(send_loop()),
                         ]
                         _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        for task in _done:
+                            with suppress(asyncio.CancelledError):
+                                exc = task.exception()
+                                if exc is not None:
+                                    logger.error("session task failed: %s", exc)
                         for task in pending:
                             task.cancel()
                             try:
@@ -465,10 +702,12 @@ class ServerState:
                         await ws.close()
                         clog.log("info", "session closed")
                     finally:
+                        self.finish_keyword_wait()
                         self.clear_active_prompt_queue(session_prompt_queue)
             clog.log("info", "done with connection")
             return ws
         finally:
+            self.finish_keyword_wait()
             self.clear_active_conversation_log_path(conversation_logger.path)
             await model_text_logger.flush()
             if session_transcriber is not None:
@@ -495,7 +734,7 @@ async def stdin_prompt_loop(state: ServerState):
         if not prompt_text:
             continue
 
-        if state.queue_live_prompt(prompt_text):
+        if state.queue_live_prompt_with_source(prompt_text, "manual"):
             logger.info(f"queued live prompt: {prompt_text}")
         else:
             logger.warning("ignored live prompt because no active session is running")
@@ -551,6 +790,64 @@ def _get_static_path(static: Optional[str]) -> Optional[str]:
     return None
 
 
+def _cli_flag_present(flag: str, argv: list[str]) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
+
+
+def _resolve_cli_sampling_config(args) -> SamplingConfig:
+    profile_defaults = PROFILE_PRESETS[args.profile]
+    return _validate_sampling_config(SamplingConfig(
+        profile=args.profile,
+        temp_text=profile_defaults.temp_text if args.temp_text is None else args.temp_text,
+        topk_text=profile_defaults.topk_text if args.topk_text is None else args.topk_text,
+        temp_audio=profile_defaults.temp_audio if args.temp_audio is None else args.temp_audio,
+        topk_audio=profile_defaults.topk_audio if args.topk_audio is None else args.topk_audio,
+        seed=profile_defaults.seed if args.seed is None else args.seed,
+        greedy=profile_defaults.greedy if args.greedy is None else args.greedy,
+    ))
+
+
+def _apply_bundle_defaults(args, argv: list[str]) -> None:
+    bundle_fields = {
+        "live_prompt_stdin": "--live-prompt-stdin",
+        "enable_transcription": "--enable-transcription",
+        "llm_log_watcher": "--llm-log-watcher",
+        "llm_trigger_mode": "--llm-trigger-mode",
+        "llm_model": "--llm-model",
+        "llm_poll_seconds": "--llm-poll-seconds",
+        "static": "--static",
+    }
+
+    def apply_bundle(values: dict[str, object]) -> None:
+        for attr, value in values.items():
+            if _cli_flag_present(bundle_fields[attr], argv):
+                continue
+            setattr(args, attr, value)
+
+    if args.default_keyword:
+        apply_bundle(
+            {
+                "live_prompt_stdin": True,
+                "enable_transcription": True,
+                "llm_log_watcher": True,
+                "llm_trigger_mode": "keyword",
+                "llm_model": "gpt-5",
+                "static": "/home/ubuntu/personaplex/client/dist",
+            }
+        )
+
+    if args.default_watcher:
+        apply_bundle(
+            {
+                "live_prompt_stdin": True,
+                "enable_transcription": True,
+                "llm_log_watcher": True,
+                "llm_poll_seconds": 2.0,
+                "llm_model": "gpt-5",
+            }
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="localhost", type=str)
@@ -570,6 +867,75 @@ def main():
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload LM model layers to CPU when GPU memory is insufficient. "
                              "Requires 'accelerate' package.")
+    parser.add_argument(
+        "--profile",
+        choices=("def", "pred", "cons", "det"),
+        default="def",
+        help=(
+            "Live generation profile: "
+            "def=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=-1, greedy=false; result: current intended balance), "
+            "pred=(temp_text=0.55, topk_text=20, temp_audio=0.65, topk_audio=115, seed=1234, greedy=false; result: close to defaults, but steadier), "
+            "cons=(temp_text=0.4, topk_text=10, temp_audio=0.5, topk_audio=50, seed=1234, greedy=false; result: still sounds/generated naturally, but with much less drift and surprise), "
+            "det=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=1234, greedy=true; result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable)."
+        ),
+    )
+    parser.add_argument(
+        "--temp-text",
+        type=float,
+        default=None,
+        help="Override --profile text temperature for live use.",
+    )
+    parser.add_argument(
+        "--topk-text",
+        type=int,
+        default=None,
+        help="Override --profile text top-k for live use.",
+    )
+    parser.add_argument(
+        "--temp-audio",
+        type=float,
+        default=None,
+        help="Override --profile audio temperature for live use.",
+    )
+    parser.add_argument(
+        "--topk-audio",
+        type=int,
+        default=None,
+        help="Override --profile audio top-k for live use.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override --profile live seed. Use -1 to disable fixed seeding.",
+    )
+    parser.add_argument(
+        "--greedy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override --profile live greedy decoding. Use --greedy or --no-greedy.",
+    )
+    parser.add_argument(
+        "--session-params-override",
+        action="store_true",
+        help="Allow incoming live session params (temperature, top-k, seed, greedy) to override resolved CLI/profile values.",
+    )
+    parser.add_argument(
+        "--default_keyword",
+        action="store_true",
+        help=(
+            "Preset for keyword-triggered supervisor mode. Enables stdin live prompts, transcription, "
+            "LLM log watcher, trigger mode keyword, model gpt-5, and static frontend serving."
+        ),
+    )
+    parser.add_argument(
+        "--default_watcher",
+        action="store_true",
+        help=(
+            "Preset for watcher mode. Enables stdin live prompts, transcription, "
+            "LLM log watcher, model gpt-5, and a 2 second watcher poll interval."
+        ),
+    )
     parser.add_argument(
         "--live-prompt-stdin",
         action="store_true",
@@ -635,9 +1001,15 @@ def main():
     )
     parser.add_argument(
         "--llm-trigger-mode",
-        choices=("user", "any"),
+        choices=("user", "any", "keyword"),
         default="user",
         help="Which new log lines should trigger an LLM call.",
+    )
+    parser.add_argument(
+        "--llm-trigger-keyword",
+        type=str,
+        default="my supervisor",
+        help="Case-insensitive phrase that triggers supervisor lookup in --llm-trigger-mode keyword.",
     )
     parser.add_argument(
         "--llm-payload-mode",
@@ -682,6 +1054,8 @@ def main():
     )
 
     args = parser.parse_args()
+    _apply_bundle_defaults(args, sys.argv[1:])
+    sampling_config = _resolve_cli_sampling_config(args)
     if args.transcription_chunk_seconds <= 0:
         raise ValueError("--transcription-chunk-seconds must be > 0")
     if args.transcription_overlap_seconds < 0:
@@ -692,6 +1066,8 @@ def main():
         raise ValueError("--llm-poll-seconds must be > 0")
     if args.llm_injection_template and "{prompt}" not in args.llm_injection_template:
         raise ValueError("--llm-injection-template must include the {prompt} placeholder")
+    if args.llm_trigger_mode == "keyword" and not args.llm_trigger_keyword.strip():
+        raise ValueError("--llm-trigger-keyword must not be empty when --llm-trigger-mode keyword is used")
     args.voice_prompt_dir = _get_voice_prompt_dir(
         args.voice_prompt_dir,
         args.hf_repo,
@@ -706,6 +1082,17 @@ def main():
         f"Static path does not exist: {static_path}."
     logger.info(f"static_path = {static_path}")
     args.device = torch_auto_device(args.device)
+    logger.info(
+        "live sampling profile=%s temp_text=%.2f topk_text=%d temp_audio=%.2f topk_audio=%d seed=%d greedy=%s session_params_override=%s",
+        sampling_config.profile,
+        sampling_config.temp_text,
+        sampling_config.topk_text,
+        sampling_config.temp_audio,
+        sampling_config.topk_audio,
+        sampling_config.seed,
+        sampling_config.greedy,
+        args.session_params_override,
+    )
     if args.enable_transcription:
         logger.info(
             "user transcription enabled: model=%s log_dir=%s chunk=%.2fs overlap=%.2fs",
@@ -716,10 +1103,11 @@ def main():
         )
     if args.llm_log_watcher:
         logger.info(
-            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s payload=%s poll=%.2fs",
+            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s keyword=%s payload=%s poll=%.2fs",
             args.llm_model,
             args.llm_system_prompt_file,
             args.llm_trigger_mode,
+            args.llm_trigger_keyword,
             args.llm_payload_mode,
             args.llm_poll_seconds,
         )
@@ -772,6 +1160,8 @@ def main():
         save_voice_prompt_embeddings=False,
         live_prompt_mode=args.live_prompt_mode,
         live_prompt_prefix=args.live_prompt_prefix,
+        sampling_config=sampling_config,
+        session_params_override=args.session_params_override,
         transcription_config=TranscriptionConfig(
             enabled=args.enable_transcription,
             model_id=args.transcription_model_id,
@@ -784,6 +1174,7 @@ def main():
             model=args.llm_model,
             system_prompt_file=Path(args.llm_system_prompt_file),
             trigger_mode=args.llm_trigger_mode,
+            trigger_keyword=args.llm_trigger_keyword.strip(),
             payload_mode=args.llm_payload_mode,
             rolling_lines=args.llm_rolling_lines,
             injection_template=args.llm_injection_template,

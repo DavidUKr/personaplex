@@ -48,7 +48,101 @@ export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>
 
 ### Launch Server
 
-Launch server for live interaction (temporary SSL certs for https):
+Recommended startup methods:
+
+1. Minimal startup with no arguments:
+```bash
+python -m moshi.server
+```
+Use this when you want the simplest local launch with the default server behavior.
+
+2. Keyword supervisor preset:
+```bash
+python -m moshi.server --default_keyword
+```
+Use this when you want the bundled keyword-triggered supervisor workflow. It enables live prompt stdin, transcription, the LLM log watcher, `--llm-trigger-mode keyword`, `--llm-model gpt-5`, and `--static /home/ubuntu/personaplex/client/dist`.
+
+3. Watcher preset:
+```bash
+python -m moshi.server --default_watcher
+```
+Use this when you want the watcher and transcription workflow without the keyword frontend preset. It enables live prompt stdin, transcription, the LLM log watcher, `--llm-model gpt-5`, and `--llm-poll-seconds 2`.
+
+Explicit CLI flags still override preset values. Example:
+```bash
+python -m moshi.server --default_watcher --llm-model gpt-5-mini --llm-poll-seconds 5
+```
+
+Live generation profiles:
+
+- `--profile def`
+  - `temp_text=0.7`
+  - `topk_text=25`
+  - `temp_audio=0.8`
+  - `topk_audio=250`
+  - `seed=-1`
+  - `greedy=false`
+  - Result: current intended balance.
+- `--profile pred`
+  - `temp_text=0.55`
+  - `topk_text=20`
+  - `temp_audio=0.65`
+  - `topk_audio=115`
+  - `seed=1234`
+  - `greedy=false`
+  - Result: close to defaults, but steadier.
+- `--profile cons`
+  - `temp_text=0.4`
+  - `topk_text=10`
+  - `temp_audio=0.5`
+  - `topk_audio=50`
+  - `seed=1234`
+  - `greedy=false`
+  - Result: still sounds/generated naturally, but with much less drift and surprise.
+- `--profile det`
+  - `temp_text=0.7`
+  - `topk_text=25`
+  - `temp_audio=0.8`
+  - `topk_audio=250`
+  - `seed=1234`
+  - `greedy=true`
+  - Result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable.
+
+Profile examples:
+```bash
+python -m moshi.server --profile def
+python -m moshi.server --profile pred
+python -m moshi.server --profile cons
+python -m moshi.server --profile det
+```
+
+Explicit live sampling overrides always take priority over the selected profile:
+```bash
+python -m moshi.server --profile cons --temp-text 0.45 --topk-audio 64 --seed 2024
+python -m moshi.server --profile det --no-greedy --temp-text 0.6 --topk-text 30
+```
+
+Available live sampling override arguments:
+
+- `--temp-text`
+- `--topk-text`
+- `--temp-audio`
+- `--topk-audio`
+- `--seed`
+- `--greedy` / `--no-greedy`
+
+Live precedence:
+
+- By default, server CLI values win for live sessions, including the values resolved from `--profile`.
+- If you want incoming session parameters to win instead, start the server with `--session-params-override`.
+- When `--session-params-override` is enabled, the live server accepts session-level `text_temperature`, `text_topk`, `audio_temperature`, `audio_topk`, `seed`, and `greedy`.
+
+Example:
+```bash
+python -m moshi.server --profile cons --session-params-override
+```
+
+Launch server for live interaction with temporary SSL certs for https:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
 ```
@@ -61,7 +155,7 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
   --conversation-log-dir "./logs/conversations"
 ```
 
-To test the back llm functionalities, here is a good starting point:
+To test the backend LLM watcher functionality directly without a preset:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server 
   --ssl "$SSL_DIR" 
@@ -94,6 +188,7 @@ Each conversation log is written in chronological order with one entry per line.
 
 - `[initial_prompt]` for the initial text prompt sent when the session starts
 - `[user]` for finalized speech-to-text segments from microphone input
+- `[user ignored]` for follow-up speech captured while PersonaPlex is waiting for supervisor help
 - `[model]` for generated assistant text grouped into readable segments
 - `[prompt]` for live prompts injected during an active session
 
@@ -150,6 +245,7 @@ The watcher defaults to:
 - model `gpt-5-nano`
 - system prompt file [moshi/moshi/llm_sys_prompt.txt](/Users/davidkrinurs/projects/personaplex/moshi/moshi/llm_sys_prompt.txt)
 - trigger mode `user`, which calls the LLM only when new `[user]` transcription lines are appended
+- trigger keyword `my supervisor`, used only in `--llm-trigger-mode keyword`
 - payload mode `rolling`, which sends the latest 15 tagged log lines
 - raw live prompt injection, unless `--llm-injection-template` is provided
 
@@ -161,6 +257,10 @@ Useful options:
   - Overrides the default system prompt file.
 - `--llm-trigger-mode any`
   - Calls the LLM after any newly appended tagged log line.
+- `--llm-trigger-mode keyword`
+  - Calls the LLM only after a `[model]` log line contains the configured supervisor phrase, then pauses PersonaPlex until the injected answer is applied.
+- `--llm-trigger-keyword "my supervisor"`
+  - Sets the case-insensitive supervisor phrase to watch for in `keyword` mode.
 - `--llm-payload-mode full`
   - Sends the full conversation log instead of the latest rolling window.
 - `--llm-injection-template "NEW INFO: {prompt} END"`
@@ -179,7 +279,20 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
   --llm-model gpt-5-mini
 ```
 
+Example using supervisor handoff mode:
+```bash
+export OPENAI_API_KEY=<TOKEN>
+SSL_DIR=$(mktemp -d); python -m moshi.server \
+  --ssl "$SSL_DIR" \
+  --enable-transcription \
+  --llm-log-watcher \
+  --llm-trigger-mode keyword \
+  --llm-trigger-keyword "my supervisor"
+```
+
 If no active session log is registered, the watcher falls back to the newest `.log` file in `--conversation-log-dir`. If it generates output while no session is active, the output is still printed but the live injection is dropped.
+
+In `keyword` mode, PersonaPlex should say the configured supervisor phrase when it needs outside context. After that phrase is logged, the watcher requests a supervisor answer, PersonaPlex stops consuming new user audio, and any continued user speech is transcribed as `[user ignored]` until the supervisor prompt is injected. Once the prompt is applied, normal turn-taking resumes.
 
 ### Offline Evaluation
 

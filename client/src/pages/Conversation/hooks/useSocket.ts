@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useCallback, useRef } from "react";
 import { WSMessage, SocketStatus } from "../../../protocol/types";
 import { decodeMessage, encodeMessage } from "../../../protocol/encoder";
 
@@ -6,12 +6,13 @@ export const useSocket = ({
   onMessage,
   uri,
   onDisconnect: onDisconnectProp,
+  initialMessages = [],
 }: {
   onMessage?: (message: WSMessage) => void;
   uri: string;
   onDisconnect?: () => void;
+  initialMessages?: WSMessage[];
 }) => {
-  const lastMessageTime = useRef<null|number>(null);
   const socketRef = useRef<WebSocket | null>(null); // useRef to keep stable socket reference
   const [socketStatus, setSocketStatus] = useState<SocketStatus>("disconnected");
 
@@ -29,7 +30,12 @@ export const useSocket = ({
   const onConnect = useCallback(() => {
     console.log("connected, now waiting for handshake.");
     setSocketStatus("connecting");
-  }, [setSocketStatus]);
+    if (socketRef.current) {
+      for (const message of initialMessages) {
+        socketRef.current.send(encodeMessage(message));
+      }
+    }
+  }, [initialMessages, setSocketStatus]);
 
   const onDisconnect = useCallback((event: CloseEvent) => {
     const closedSocket = event.target as WebSocket;
@@ -51,7 +57,6 @@ export const useSocket = ({
 
   const onMessageEvent = useCallback(
     (eventData: MessageEvent) => {
-      lastMessageTime.current = Date.now();
       const dataArray = new Uint8Array(eventData.data);
       const message = decodeMessage(dataArray);
       if (message.type == "handshake") {
@@ -79,7 +84,6 @@ export const useSocket = ({
     ws.addEventListener("message", onMessageEvent);
 
     socketRef.current = ws;
-    lastMessageTime.current = Date.now();
     console.log("Socket created", ws);
   }, [uri, onMessage, onConnect, onDisconnect, onMessageEvent]);
 
@@ -95,24 +99,6 @@ export const useSocket = ({
       // socket?.close();
       // setSocket(null);
   }, []);
-
-  useEffect(() => {
-    if(socketStatus !== "connected") {
-      return;
-    }
-    const intervalId = setInterval(() => {
-      if (lastMessageTime.current && Date.now() - lastMessageTime.current > 10000) {
-        console.log("closing socket due to inactivity", socketRef.current);
-        socketRef.current?.close();
-        // onDisconnect();
-      }
-    }, 500);
-
-    return () => {
-      // lastMessageTime.current = null;
-      clearInterval(intervalId);
-    };
-  }, [socketStatus, onDisconnect]);
 
   return {
     socketStatus,
