@@ -58,7 +58,7 @@ Use this when you want the simplest local launch with the default server behavio
 
 2. Keyword supervisor preset:
 ```bash
-python -m moshi.server --default_keyword
+python -m moshi.server --default-keyword
 ```
 Use this when you want the bundled keyword-triggered supervisor workflow. It enables live prompt stdin, transcription, the LLM log watcher, `--llm-trigger-mode keyword`, `--llm-model gpt-5`, and `--static /home/ubuntu/personaplex/client/dist`.
 

@@ -922,7 +922,7 @@ def main():
         help="Allow incoming live session params (temperature, top-k, seed, greedy) to override resolved CLI/profile values. Enabled by default; use --no-session-params-override to keep server CLI/profile values authoritative.",
     )
     parser.add_argument(
-        "--default_keyword",
+        "--default-keyword",
         action="store_true",
         help=(
             "Preset for keyword-triggered supervisor mode. Enables stdin live prompts, transcription, "
