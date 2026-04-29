@@ -34,15 +34,11 @@ const buildURL = ({
   params,
   workerAuthId,
   email,
-  textSeed,
-  audioSeed,
 }: {
   workerAddr: string;
   params: ModelParamsValues;
   workerAuthId?: string;
   email?: string;
-  textSeed: number;
-  audioSeed: number;
 }) => {
   const newWorkerAddr = useMemo(() => {
     if (workerAddr == "same" || workerAddr == "") {
@@ -64,9 +60,9 @@ const buildURL = ({
   url.searchParams.append("text_topk", params.textTopk.toString());
   url.searchParams.append("audio_temperature", params.audioTemperature.toString());
   url.searchParams.append("audio_topk", params.audioTopk.toString());
+  url.searchParams.append("seed", params.randomSeed.toString());
+  url.searchParams.append("greedy", params.greedy.toString());
   url.searchParams.append("pad_mult", params.padMult.toString());
-  url.searchParams.append("text_seed", textSeed.toString());
-  url.searchParams.append("audio_seed", audioSeed.toString());
   url.searchParams.append("repetition_penalty_context", params.repetitionPenaltyContext.toString());
   url.searchParams.append("repetition_penalty", params.repetitionPenalty.toString());
   url.searchParams.append("voice_prompt", params.voicePrompt.toString());
@@ -109,8 +105,6 @@ export const Conversation:FC<ConversationProps> = ({
   const micDuration = useRef<number>(0);
   const actualAudioPlayed = useRef<number>(0);
   const textContainerRef = useRef<HTMLDivElement>(null);
-  const textSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
-  const audioSeed = useMemo(() => Math.round(1000000 * Math.random()), []);
   const initialSocketMessages = useMemo(() => [
     {
       type: "metadata" as const,
@@ -125,8 +119,6 @@ export const Conversation:FC<ConversationProps> = ({
     params: modelParams,
     workerAuthId,
     email: email,
-    textSeed: textSeed,
-    audioSeed: audioSeed,
   });
 
   const onDisconnect = useCallback(() => {

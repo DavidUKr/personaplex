@@ -116,6 +116,8 @@ python -m moshi.server --profile cons
 python -m moshi.server --profile det
 ```
 
+The homepage UI now exposes these four profiles as toggle buttons. Selecting one profile propagates its values into the editable controls for text temperature, text top-k, audio temperature, audio top-k, seed, and greedy decoding. You can then override any of those values individually before connecting. These testing values, along with the text prompt, persist in `localStorage` to make repeated testing easier.
+
 Explicit live sampling overrides always take priority over the selected profile:
 ```bash
 python -m moshi.server --profile cons --temp-text 0.45 --topk-audio 64 --seed 2024
@@ -133,13 +135,13 @@ Available live sampling override arguments:
 
 Live precedence:
 
-- By default, server CLI values win for live sessions, including the values resolved from `--profile`.
-- If you want incoming session parameters to win instead, start the server with `--session-params-override`.
-- When `--session-params-override` is enabled, the live server accepts session-level `text_temperature`, `text_topk`, `audio_temperature`, `audio_topk`, `seed`, and `greedy`.
+- By default, incoming session parameters from the UI win for live sessions, including overriding values resolved from `--profile`.
+- If you want server startup values to stay authoritative instead, start the server with `--no-session-params-override`.
+- When session parameter override is enabled, the live server accepts session-level `text_temperature`, `text_topk`, `audio_temperature`, `audio_topk`, `seed`, and `greedy`.
 
 Example:
 ```bash
-python -m moshi.server --profile cons --session-params-override
+python -m moshi.server --profile cons --no-session-params-override
 ```
 
 Launch server for live interaction with temporary SSL certs for https:
