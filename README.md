@@ -73,6 +73,75 @@ Explicit CLI flags still override preset values. Example:
 python -m moshi.server --default_watcher --llm-model gpt-5-mini --llm-poll-seconds 5
 ```
 
+Live generation profiles:
+
+- `--profile def`
+  - `temp_text=0.7`
+  - `topk_text=25`
+  - `temp_audio=0.8`
+  - `topk_audio=250`
+  - `seed=-1`
+  - `greedy=false`
+  - Result: current intended balance.
+- `--profile pred`
+  - `temp_text=0.55`
+  - `topk_text=20`
+  - `temp_audio=0.65`
+  - `topk_audio=115`
+  - `seed=1234`
+  - `greedy=false`
+  - Result: close to defaults, but steadier.
+- `--profile cons`
+  - `temp_text=0.4`
+  - `topk_text=10`
+  - `temp_audio=0.5`
+  - `topk_audio=50`
+  - `seed=1234`
+  - `greedy=false`
+  - Result: still sounds/generated naturally, but with much less drift and surprise.
+- `--profile det`
+  - `temp_text=0.7`
+  - `topk_text=25`
+  - `temp_audio=0.8`
+  - `topk_audio=250`
+  - `seed=1234`
+  - `greedy=true`
+  - Result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable.
+
+Profile examples:
+```bash
+python -m moshi.server --profile def
+python -m moshi.server --profile pred
+python -m moshi.server --profile cons
+python -m moshi.server --profile det
+```
+
+Explicit live sampling overrides always take priority over the selected profile:
+```bash
+python -m moshi.server --profile cons --temp-text 0.45 --topk-audio 64 --seed 2024
+python -m moshi.server --profile det --no-greedy --temp-text 0.6 --topk-text 30
+```
+
+Available live sampling override arguments:
+
+- `--temp-text`
+- `--topk-text`
+- `--temp-audio`
+- `--topk-audio`
+- `--seed`
+- `--greedy` / `--no-greedy`
+
+Live precedence:
+
+- By default, server CLI values win for live sessions, including the values resolved from `--profile`.
+- If you want incoming session parameters to win instead, start the server with `--session-params-override`.
+- When `--session-params-override` is enabled, the live server accepts session-level `text_temperature`, `text_topk`, `audio_temperature`, `audio_topk`, `seed`, and `greedy`.
+
+Example:
+```bash
+python -m moshi.server --profile cons --session-params-override
+```
+
 Launch server for live interaction with temporary SSL certs for https:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"

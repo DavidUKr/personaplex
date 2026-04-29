@@ -75,6 +75,57 @@ class PromptCommand:
     text: str
     source: str = "manual"
 
+
+@dataclass(frozen=True)
+class SamplingConfig:
+    profile: str
+    temp_text: float
+    topk_text: int
+    temp_audio: float
+    topk_audio: int
+    seed: int
+    greedy: bool
+
+
+PROFILE_PRESETS: dict[str, SamplingConfig] = {
+    "def": SamplingConfig(
+        profile="def",
+        temp_text=0.7,
+        topk_text=25,
+        temp_audio=0.8,
+        topk_audio=250,
+        seed=-1,
+        greedy=False,
+    ),
+    "pred": SamplingConfig(
+        profile="pred",
+        temp_text=0.55,
+        topk_text=20,
+        temp_audio=0.65,
+        topk_audio=115,
+        seed=1234,
+        greedy=False,
+    ),
+    "cons": SamplingConfig(
+        profile="cons",
+        temp_text=0.4,
+        topk_text=10,
+        temp_audio=0.5,
+        topk_audio=50,
+        seed=1234,
+        greedy=False,
+    ),
+    "det": SamplingConfig(
+        profile="det",
+        temp_text=0.7,
+        topk_text=25,
+        temp_audio=0.8,
+        topk_audio=250,
+        seed=1234,
+        greedy=True,
+    ),
+}
+
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
     """Return a torch.device based on the requested string or availability."""
     if requested is not None:
@@ -95,6 +146,29 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = False
+
+
+def _parse_query_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def _validate_sampling_config(sampling_config: SamplingConfig) -> SamplingConfig:
+    if sampling_config.temp_text < 0.0:
+        raise ValueError("text temperature must be >= 0")
+    if sampling_config.temp_audio < 0.0:
+        raise ValueError("audio temperature must be >= 0")
+    if sampling_config.topk_text < 0:
+        raise ValueError("text top-k must be >= 0")
+    if sampling_config.topk_audio < 0:
+        raise ValueError("audio top-k must be >= 0")
+    return sampling_config
 
 
 def wrap_with_system_tags(text: str) -> str:
@@ -172,6 +246,8 @@ class ServerState:
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
                  live_prompt_prefix: str = "[SYSTEM PROMPT]:",
+                 sampling_config: SamplingConfig | None = None,
+                 session_params_override: bool = False,
                  transcription_config: TranscriptionConfig | None = None,
                  llm_watcher_config: LLMWatcherConfig | None = None):
         llm_watcher_config = llm_watcher_config or LLMWatcherConfig()
@@ -182,6 +258,8 @@ class ServerState:
         self.voice_prompt_dir = voice_prompt_dir
         self.live_prompt_mode = live_prompt_mode
         self.live_prompt_prefix = live_prompt_prefix
+        self.sampling_config = sampling_config or PROFILE_PRESETS["def"]
+        self.session_params_override = session_params_override
         self.transcription_config = transcription_config or TranscriptionConfig()
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
         self.lm_gen = LMGen(lm,
@@ -191,6 +269,7 @@ class ServerState:
                             frame_rate=self.mimi.frame_rate,
                             save_voice_prompt_embeddings=save_voice_prompt_embeddings,
         )
+        self.apply_sampling_config(self.sampling_config)
         
         self.lock = asyncio.Lock()
         self.mimi.streaming_forever(1)
@@ -215,6 +294,34 @@ class ServerState:
                 start_keyword_wait=self.start_keyword_wait,
                 cancel_keyword_wait=self.cancel_keyword_wait,
             )
+
+    def apply_sampling_config(self, sampling_config: SamplingConfig) -> None:
+        self.lm_gen.use_sampling = not sampling_config.greedy
+        self.lm_gen.temp = sampling_config.temp_audio
+        self.lm_gen.temp_text = sampling_config.temp_text
+        self.lm_gen.top_k = sampling_config.topk_audio
+        self.lm_gen.top_k_text = sampling_config.topk_text
+
+    def resolve_session_sampling_config(self, request: web.Request) -> SamplingConfig:
+        if not self.session_params_override:
+            return self.sampling_config
+
+        query = request.query
+        temp_text = float(query.get("text_temperature", self.sampling_config.temp_text))
+        topk_text = int(query.get("text_topk", self.sampling_config.topk_text))
+        temp_audio = float(query.get("audio_temperature", self.sampling_config.temp_audio))
+        topk_audio = int(query.get("audio_topk", self.sampling_config.topk_audio))
+        seed = int(query.get("seed", self.sampling_config.seed))
+        greedy = _parse_query_bool(query.get("greedy"))
+        return _validate_sampling_config(SamplingConfig(
+            profile=self.sampling_config.profile,
+            temp_text=temp_text,
+            topk_text=topk_text,
+            temp_audio=temp_audio,
+            topk_audio=topk_audio,
+            seed=seed,
+            greedy=self.sampling_config.greedy if greedy is None else greedy,
+        ))
     
     def warmup(self):
         for _ in range(4):
@@ -348,7 +455,8 @@ class ServerState:
                 if initial_text_prompt
                 else None
             )
-            seed = int(request.query["seed"]) if "seed" in request.query else None
+            session_sampling = self.resolve_session_sampling_config(request)
+            seed = session_sampling.seed
             session_prompt_queue: asyncio.Queue[PromptCommand] = asyncio.Queue()
             await conversation_logger.write_entry("initial_prompt", initial_text_prompt)
 
@@ -522,8 +630,21 @@ class ServerState:
                 clog.log("info", f"text prompt: {initial_text_prompt}")
             if len(request.query["voice_prompt"]) > 0:
                 clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
+            clog.log(
+                "info",
+                (
+                    f"sampling profile={session_sampling.profile} "
+                    f"temp_text={session_sampling.temp_text:.2f} "
+                    f"topk_text={session_sampling.topk_text} "
+                    f"temp_audio={session_sampling.temp_audio:.2f} "
+                    f"topk_audio={session_sampling.topk_audio} "
+                    f"seed={session_sampling.seed} "
+                    f"greedy={session_sampling.greedy}"
+                ),
+            )
             close = False
             async with self.lock:
+                self.apply_sampling_config(session_sampling)
                 if seed is not None and seed != -1:
                     seed_all(seed)
 
@@ -673,6 +794,19 @@ def _cli_flag_present(flag: str, argv: list[str]) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
 
 
+def _resolve_cli_sampling_config(args) -> SamplingConfig:
+    profile_defaults = PROFILE_PRESETS[args.profile]
+    return _validate_sampling_config(SamplingConfig(
+        profile=args.profile,
+        temp_text=profile_defaults.temp_text if args.temp_text is None else args.temp_text,
+        topk_text=profile_defaults.topk_text if args.topk_text is None else args.topk_text,
+        temp_audio=profile_defaults.temp_audio if args.temp_audio is None else args.temp_audio,
+        topk_audio=profile_defaults.topk_audio if args.topk_audio is None else args.topk_audio,
+        seed=profile_defaults.seed if args.seed is None else args.seed,
+        greedy=profile_defaults.greedy if args.greedy is None else args.greedy,
+    ))
+
+
 def _apply_bundle_defaults(args, argv: list[str]) -> None:
     bundle_fields = {
         "live_prompt_stdin": "--live-prompt-stdin",
@@ -733,6 +867,59 @@ def main():
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload LM model layers to CPU when GPU memory is insufficient. "
                              "Requires 'accelerate' package.")
+    parser.add_argument(
+        "--profile",
+        choices=("def", "pred", "cons", "det"),
+        default="def",
+        help=(
+            "Live generation profile: "
+            "def=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=-1, greedy=false; result: current intended balance), "
+            "pred=(temp_text=0.55, topk_text=20, temp_audio=0.65, topk_audio=115, seed=1234, greedy=false; result: close to defaults, but steadier), "
+            "cons=(temp_text=0.4, topk_text=10, temp_audio=0.5, topk_audio=50, seed=1234, greedy=false; result: still sounds/generated naturally, but with much less drift and surprise), "
+            "det=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=1234, greedy=true; result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable)."
+        ),
+    )
+    parser.add_argument(
+        "--temp-text",
+        type=float,
+        default=None,
+        help="Override --profile text temperature for live use.",
+    )
+    parser.add_argument(
+        "--topk-text",
+        type=int,
+        default=None,
+        help="Override --profile text top-k for live use.",
+    )
+    parser.add_argument(
+        "--temp-audio",
+        type=float,
+        default=None,
+        help="Override --profile audio temperature for live use.",
+    )
+    parser.add_argument(
+        "--topk-audio",
+        type=int,
+        default=None,
+        help="Override --profile audio top-k for live use.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override --profile live seed. Use -1 to disable fixed seeding.",
+    )
+    parser.add_argument(
+        "--greedy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override --profile live greedy decoding. Use --greedy or --no-greedy.",
+    )
+    parser.add_argument(
+        "--session-params-override",
+        action="store_true",
+        help="Allow incoming live session params (temperature, top-k, seed, greedy) to override resolved CLI/profile values.",
+    )
     parser.add_argument(
         "--default_keyword",
         action="store_true",
@@ -868,6 +1055,7 @@ def main():
 
     args = parser.parse_args()
     _apply_bundle_defaults(args, sys.argv[1:])
+    sampling_config = _resolve_cli_sampling_config(args)
     if args.transcription_chunk_seconds <= 0:
         raise ValueError("--transcription-chunk-seconds must be > 0")
     if args.transcription_overlap_seconds < 0:
@@ -894,6 +1082,17 @@ def main():
         f"Static path does not exist: {static_path}."
     logger.info(f"static_path = {static_path}")
     args.device = torch_auto_device(args.device)
+    logger.info(
+        "live sampling profile=%s temp_text=%.2f topk_text=%d temp_audio=%.2f topk_audio=%d seed=%d greedy=%s session_params_override=%s",
+        sampling_config.profile,
+        sampling_config.temp_text,
+        sampling_config.topk_text,
+        sampling_config.temp_audio,
+        sampling_config.topk_audio,
+        sampling_config.seed,
+        sampling_config.greedy,
+        args.session_params_override,
+    )
     if args.enable_transcription:
         logger.info(
             "user transcription enabled: model=%s log_dir=%s chunk=%.2fs overlap=%.2fs",
@@ -961,6 +1160,8 @@ def main():
         save_voice_prompt_embeddings=False,
         live_prompt_mode=args.live_prompt_mode,
         live_prompt_prefix=args.live_prompt_prefix,
+        sampling_config=sampling_config,
+        session_params_override=args.session_params_override,
         transcription_config=TranscriptionConfig(
             enabled=args.enable_transcription,
             model_id=args.transcription_model_id,
