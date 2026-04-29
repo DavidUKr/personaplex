@@ -669,6 +669,51 @@ def _get_static_path(static: Optional[str]) -> Optional[str]:
     return None
 
 
+def _cli_flag_present(flag: str, argv: list[str]) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
+
+
+def _apply_bundle_defaults(args, argv: list[str]) -> None:
+    bundle_fields = {
+        "live_prompt_stdin": "--live-prompt-stdin",
+        "enable_transcription": "--enable-transcription",
+        "llm_log_watcher": "--llm-log-watcher",
+        "llm_trigger_mode": "--llm-trigger-mode",
+        "llm_model": "--llm-model",
+        "llm_poll_seconds": "--llm-poll-seconds",
+        "static": "--static",
+    }
+
+    def apply_bundle(values: dict[str, object]) -> None:
+        for attr, value in values.items():
+            if _cli_flag_present(bundle_fields[attr], argv):
+                continue
+            setattr(args, attr, value)
+
+    if args.default_keyword:
+        apply_bundle(
+            {
+                "live_prompt_stdin": True,
+                "enable_transcription": True,
+                "llm_log_watcher": True,
+                "llm_trigger_mode": "keyword",
+                "llm_model": "gpt-5",
+                "static": "/home/ubuntu/personaplex/client/dist",
+            }
+        )
+
+    if args.default_watcher:
+        apply_bundle(
+            {
+                "live_prompt_stdin": True,
+                "enable_transcription": True,
+                "llm_log_watcher": True,
+                "llm_poll_seconds": 2.0,
+                "llm_model": "gpt-5",
+            }
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="localhost", type=str)
@@ -688,6 +733,22 @@ def main():
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload LM model layers to CPU when GPU memory is insufficient. "
                              "Requires 'accelerate' package.")
+    parser.add_argument(
+        "--default_keyword",
+        action="store_true",
+        help=(
+            "Preset for keyword-triggered supervisor mode. Enables stdin live prompts, transcription, "
+            "LLM log watcher, trigger mode keyword, model gpt-5, and static frontend serving."
+        ),
+    )
+    parser.add_argument(
+        "--default_watcher",
+        action="store_true",
+        help=(
+            "Preset for watcher mode. Enables stdin live prompts, transcription, "
+            "LLM log watcher, model gpt-5, and a 2 second watcher poll interval."
+        ),
+    )
     parser.add_argument(
         "--live-prompt-stdin",
         action="store_true",
@@ -806,6 +867,7 @@ def main():
     )
 
     args = parser.parse_args()
+    _apply_bundle_defaults(args, sys.argv[1:])
     if args.transcription_chunk_seconds <= 0:
         raise ValueError("--transcription-chunk-seconds must be > 0")
     if args.transcription_overlap_seconds < 0:

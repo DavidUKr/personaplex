@@ -48,7 +48,32 @@ export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>
 
 ### Launch Server
 
-Launch server for live interaction (temporary SSL certs for https):
+Recommended startup methods:
+
+1. Minimal startup with no arguments:
+```bash
+python -m moshi.server
+```
+Use this when you want the simplest local launch with the default server behavior.
+
+2. Keyword supervisor preset:
+```bash
+python -m moshi.server --default_keyword
+```
+Use this when you want the bundled keyword-triggered supervisor workflow. It enables live prompt stdin, transcription, the LLM log watcher, `--llm-trigger-mode keyword`, `--llm-model gpt-5`, and `--static /home/ubuntu/personaplex/client/dist`.
+
+3. Watcher preset:
+```bash
+python -m moshi.server --default_watcher
+```
+Use this when you want the watcher and transcription workflow without the keyword frontend preset. It enables live prompt stdin, transcription, the LLM log watcher, `--llm-model gpt-5`, and `--llm-poll-seconds 2`.
+
+Explicit CLI flags still override preset values. Example:
+```bash
+python -m moshi.server --default_watcher --llm-model gpt-5-mini --llm-poll-seconds 5
+```
+
+Launch server for live interaction with temporary SSL certs for https:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
 ```
@@ -61,7 +86,7 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
   --conversation-log-dir "./logs/conversations"
 ```
 
-To test the back llm functionalities, here is a good starting point:
+To test the backend LLM watcher functionality directly without a preset:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server 
   --ssl "$SSL_DIR" 
