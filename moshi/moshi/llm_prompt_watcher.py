@@ -10,6 +10,33 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+def _default_kb_path() -> Path:
+    return Path(__file__).with_name("knowledge").joinpath("hellotech_kb.json")
+
+
+def _resolve_kb_path(configured_path: Path) -> Path:
+    candidates: list[Path] = [configured_path]
+    cwd = Path.cwd()
+
+    # Support running from the repo root even when the installed package in site-packages
+    # does not include the bundled knowledge JSON yet.
+    candidates.extend([
+        cwd / "moshi" / "moshi" / "knowledge" / configured_path.name,
+        cwd / "moshi" / "knowledge" / configured_path.name,
+        cwd / "knowledge" / configured_path.name,
+    ])
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return configured_path
+
+
 def _should_include_log_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -22,7 +49,7 @@ class LLMWatcherConfig:
     enabled: bool = False
     model: str = "gpt-5-nano"
     system_prompt_file: Path = Path(__file__).with_name("llm_sys_prompt.txt")
-    kb_json_path: Path = Path(__file__).with_name("knowledge").joinpath("hellotech_kb.json")
+    kb_json_path: Path = _default_kb_path()
     kb_top_k: int = 6
     kb_relevance_threshold: float = 0.3
     trigger_mode: str = "user"
@@ -95,9 +122,15 @@ class OpenAILogPromptWatcher:
         if not self._system_prompt:
             raise RuntimeError(f"LLM system prompt file is empty: {prompt_path}")
 
-        kb_path = self.config.kb_json_path
+        kb_path = _resolve_kb_path(self.config.kb_json_path)
         if not kb_path.exists():
             raise RuntimeError(f"LLM watcher knowledge base file does not exist: {kb_path}")
+        if kb_path != self.config.kb_json_path:
+            logger.warning(
+                "configured KB path %s was not found; using fallback KB path %s",
+                self.config.kb_json_path,
+                kb_path,
+            )
         kb_entries = json.loads(kb_path.read_text(encoding="utf-8"))
         if not isinstance(kb_entries, list) or not kb_entries:
             raise RuntimeError(f"LLM watcher knowledge base is empty or invalid: {kb_path}")
