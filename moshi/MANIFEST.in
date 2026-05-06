@@ -4,3 +4,4 @@ include *.cfg
 include requirements.txt
 include moshi/py.typed
 include moshi/llm_sys_prompt.txt
+recursive-include moshi/knowledge *.json

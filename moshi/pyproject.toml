@@ -29,6 +29,13 @@ readme = "README.md"
 moshi-server = "moshi.server:main"
 moshi-offline = "moshi.offline:main"
 
+[tool.setuptools.package-data]
+moshi = [
+    "llm_sys_prompt.txt",
+    "knowledge/*.json",
+    "py.typed",
+]
+
 [tool.setuptools.dynamic]
 version = {attr = "moshi.__version__"}
 
