@@ -7,6 +7,7 @@ type ModelParamsProps = {
   modal?: RefObject<HTMLDialogElement>,
 } &  ReturnType<typeof useModelParams>;
 export const ModelParams:FC<ModelParamsProps> = ({
+  profile,
   textTemperature,
   textTopk,
   audioTemperature,
@@ -20,6 +21,7 @@ export const ModelParams:FC<ModelParamsProps> = ({
   textPrompt,
   voicePrompt,
   randomSeed,
+  greedy,
   modal,
 }) => {
   const [modalVoicePrompt, setModalVoicePrompt] = useState<string>(voicePrompt);
@@ -84,6 +86,7 @@ export const ModelParams:FC<ModelParamsProps> = ({
           <Button onClick={() => {
             console.log("Validating params");
             setParams({
+            profile,
             textTemperature,
             textTopk,
             audioTemperature,
@@ -94,6 +97,7 @@ export const ModelParams:FC<ModelParamsProps> = ({
             textPrompt: modalTextPrompt,
             voicePrompt: modalVoicePrompt,
             randomSeed,
+            greedy,
           });
           modal?.current?.close()
         }} className="m-2">Validate</Button>
