@@ -152,7 +152,7 @@ const Homepage = ({
           <div className="mb-3">
             <span className="block text-base font-medium text-gray-700 mb-2">Generation Profile:</span>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {(["def", "pred", "cons", "det"] as ModelProfile[]).map((preset) => (
+              {(["default", "predictable", "convservative", "deterministic"] as ModelProfile[]).map((preset) => (
                 <button
                   key={preset}
                   onClick={() => setProfile(preset)}

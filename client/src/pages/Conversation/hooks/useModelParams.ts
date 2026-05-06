@@ -5,7 +5,7 @@ import {
   loadDefaultTextPrompt,
 } from "../../../prompts/defaultTextPrompt";
 
-export type ModelProfile = "def" | "pred" | "cons" | "det";
+export type ModelProfile = "default" | "predictable" | "convservative" | "deterministic";
 
 export const DEFAULT_TEXT_TEMPERATURE = 0.7;
 export const DEFAULT_TEXT_TOPK = 25;
@@ -16,7 +16,7 @@ export const DEFAULT_REPETITION_PENALTY_CONTEXT = 64;
 export const DEFAULT_REPETITION_PENALTY = 1.0;
 export const DEFAULT_VOICE_PROMPT = "NATF0.pt";
 export const DEFAULT_RANDOM_SEED = -1;
-export const DEFAULT_PROFILE: ModelProfile = "def";
+export const DEFAULT_PROFILE: ModelProfile = "default";
 export const DEFAULT_GREEDY = false;
 
 export const PROFILE_PRESETS: Record<ModelProfile, {
@@ -27,7 +27,7 @@ export const PROFILE_PRESETS: Record<ModelProfile, {
   randomSeed: number;
   greedy: boolean;
 }> = {
-  def: {
+  default: {
     textTemperature: 0.7,
     textTopk: 25,
     audioTemperature: 0.8,
@@ -35,7 +35,7 @@ export const PROFILE_PRESETS: Record<ModelProfile, {
     randomSeed: -1,
     greedy: false,
   },
-  pred: {
+  predictable: {
     textTemperature: 0.55,
     textTopk: 20,
     audioTemperature: 0.65,
@@ -43,7 +43,7 @@ export const PROFILE_PRESETS: Record<ModelProfile, {
     randomSeed: 1234,
     greedy: false,
   },
-  cons: {
+  convservative: {
     textTemperature: 0.4,
     textTopk: 10,
     audioTemperature: 0.5,
@@ -51,7 +51,7 @@ export const PROFILE_PRESETS: Record<ModelProfile, {
     randomSeed: 1234,
     greedy: false,
   },
-  det: {
+  deterministic: {
     textTemperature: 0.7,
     textTopk: 25,
     audioTemperature: 0.8,

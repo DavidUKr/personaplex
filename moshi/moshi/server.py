@@ -88,8 +88,8 @@ class SamplingConfig:
 
 
 PROFILE_PRESETS: dict[str, SamplingConfig] = {
-    "def": SamplingConfig(
-        profile="def",
+    "default": SamplingConfig(
+        profile="default",
         temp_text=0.7,
         topk_text=25,
         temp_audio=0.8,
@@ -97,8 +97,8 @@ PROFILE_PRESETS: dict[str, SamplingConfig] = {
         seed=-1,
         greedy=False,
     ),
-    "pred": SamplingConfig(
-        profile="pred",
+    "predictable": SamplingConfig(
+        profile="predictable",
         temp_text=0.55,
         topk_text=20,
         temp_audio=0.65,
@@ -106,8 +106,8 @@ PROFILE_PRESETS: dict[str, SamplingConfig] = {
         seed=1234,
         greedy=False,
     ),
-    "cons": SamplingConfig(
-        profile="cons",
+    "convservative": SamplingConfig(
+        profile="convservative",
         temp_text=0.4,
         topk_text=10,
         temp_audio=0.5,
@@ -115,8 +115,8 @@ PROFILE_PRESETS: dict[str, SamplingConfig] = {
         seed=1234,
         greedy=False,
     ),
-    "det": SamplingConfig(
-        profile="det",
+    "deterministic": SamplingConfig(
+        profile="deterministic",
         temp_text=0.7,
         topk_text=25,
         temp_audio=0.8,
@@ -258,7 +258,7 @@ class ServerState:
         self.voice_prompt_dir = voice_prompt_dir
         self.live_prompt_mode = live_prompt_mode
         self.live_prompt_prefix = live_prompt_prefix
-        self.sampling_config = sampling_config or PROFILE_PRESETS["def"]
+        self.sampling_config = sampling_config or PROFILE_PRESETS["default"]
         self.session_params_override = session_params_override
         self.transcription_config = transcription_config or TranscriptionConfig()
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
@@ -869,14 +869,14 @@ def main():
                              "Requires 'accelerate' package.")
     parser.add_argument(
         "--profile",
-        choices=("def", "pred", "cons", "det"),
-        default="def",
+        choices=("default", "predictable", "convservative", "deterministic"),
+        default="default",
         help=(
             "Live generation profile: "
-            "def=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=-1, greedy=false; result: current intended balance), "
-            "pred=(temp_text=0.55, topk_text=20, temp_audio=0.65, topk_audio=115, seed=1234, greedy=false; result: close to defaults, but steadier), "
-            "cons=(temp_text=0.4, topk_text=10, temp_audio=0.5, topk_audio=50, seed=1234, greedy=false; result: still sounds/generated naturally, but with much less drift and surprise), "
-            "det=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=1234, greedy=true; result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable)."
+            "default=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=-1, greedy=false; result: current intended balance), "
+            "predictable=(temp_text=0.55, topk_text=20, temp_audio=0.65, topk_audio=115, seed=1234, greedy=false; result: close to defaults, but steadier), "
+            "convservative=(temp_text=0.4, topk_text=10, temp_audio=0.5, topk_audio=50, seed=1234, greedy=false; result: still sounds/generated naturally, but with much less drift and surprise), "
+            "deterministic=(temp_text=0.7, topk_text=25, temp_audio=0.8, topk_audio=250, seed=1234, greedy=true; result: most predictable possible output. Same input should produce the same output path, assuming the runtime is stable)."
         ),
     )
     parser.add_argument(

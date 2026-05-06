@@ -75,7 +75,7 @@ python -m moshi.server --default_watcher --llm-model gpt-5-mini --llm-poll-secon
 
 Live generation profiles:
 
-- `--profile def`
+- `--profile default`
   - `temp_text=0.7`
   - `topk_text=25`
   - `temp_audio=0.8`
@@ -83,7 +83,7 @@ Live generation profiles:
   - `seed=-1`
   - `greedy=false`
   - Result: current intended balance.
-- `--profile pred`
+- `--profile predictable`
   - `temp_text=0.55`
   - `topk_text=20`
   - `temp_audio=0.65`
@@ -91,7 +91,7 @@ Live generation profiles:
   - `seed=1234`
   - `greedy=false`
   - Result: close to defaults, but steadier.
-- `--profile cons`
+- `--profile convservative`
   - `temp_text=0.4`
   - `topk_text=10`
   - `temp_audio=0.5`
@@ -99,7 +99,7 @@ Live generation profiles:
   - `seed=1234`
   - `greedy=false`
   - Result: still sounds/generated naturally, but with much less drift and surprise.
-- `--profile det`
+- `--profile deterministic`
   - `temp_text=0.7`
   - `topk_text=25`
   - `temp_audio=0.8`
@@ -110,18 +110,18 @@ Live generation profiles:
 
 Profile examples:
 ```bash
-python -m moshi.server --profile def
-python -m moshi.server --profile pred
-python -m moshi.server --profile cons
-python -m moshi.server --profile det
+python -m moshi.server --profile default
+python -m moshi.server --profile predictable
+python -m moshi.server --profile convservative
+python -m moshi.server --profile deterministic
 ```
 
 The homepage UI now exposes these four profiles as toggle buttons. Selecting one profile propagates its values into the editable controls for text temperature, text top-k, audio temperature, audio top-k, seed, and greedy decoding. You can then override any of those values individually before connecting. These testing values, along with the text prompt, persist in `localStorage` to make repeated testing easier.
 
 Explicit live sampling overrides always take priority over the selected profile:
 ```bash
-python -m moshi.server --profile cons --temp-text 0.45 --topk-audio 64 --seed 2024
-python -m moshi.server --profile det --no-greedy --temp-text 0.6 --topk-text 30
+python -m moshi.server --profile convservative --temp-text 0.45 --topk-audio 64 --seed 2024
+python -m moshi.server --profile deterministic --no-greedy --temp-text 0.6 --topk-text 30
 ```
 
 Available live sampling override arguments:
@@ -141,7 +141,7 @@ Live precedence:
 
 Example:
 ```bash
-python -m moshi.server --profile cons --no-session-params-override
+python -m moshi.server --profile convservative --no-session-params-override
 ```
 
 Launch server for live interaction with temporary SSL certs for https:
