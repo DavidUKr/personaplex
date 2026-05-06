@@ -148,12 +148,28 @@ class TranscriptionService:
             ) from exc
 
         torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            self.config.model_id,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-        )
+        model_load_kwargs = {
+            "torch_dtype": torch_dtype,
+            "low_cpu_mem_usage": True,
+            "use_safetensors": True,
+        }
+        try:
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.config.model_id,
+                **model_load_kwargs,
+            )
+        except ImportError as exc:
+            # Transformers requires accelerate whenever low_cpu_mem_usage is enabled.
+            if "accelerate" not in str(exc).lower():
+                raise
+            logger.warning(
+                "accelerate is not installed; retrying transcription model load without low_cpu_mem_usage"
+            )
+            model_load_kwargs["low_cpu_mem_usage"] = False
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.config.model_id,
+                **model_load_kwargs,
+            )
         model.to(self.device)
         processor = AutoProcessor.from_pretrained(self.config.model_id)
         device_arg: int | str = self.device.index if self.device.type == "cuda" and self.device.index is not None else (0 if self.device.type == "cuda" else -1)
