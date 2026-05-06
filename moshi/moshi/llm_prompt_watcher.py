@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ class LLMWatcherConfig:
     enabled: bool = False
     model: str = "gpt-5-nano"
     system_prompt_file: Path = Path(__file__).with_name("llm_sys_prompt.txt")
+    kb_json_path: Path = Path(__file__).with_name("knowledge").joinpath("hellotech_kb.json")
+    kb_top_k: int = 6
+    kb_relevance_threshold: float = 0.3
     trigger_mode: str = "user"
     trigger_keyword: str = "my supervisor"
     payload_mode: str = "rolling"
@@ -53,6 +57,7 @@ class OpenAILogPromptWatcher:
         self._states: dict[Path, _LogReadState] = {}
         self._client = None
         self._system_prompt = ""
+        self._vector_store = None
 
     def startup(self) -> None:
         if not self.config.enabled:
@@ -61,15 +66,22 @@ class OpenAILogPromptWatcher:
             raise ValueError("--llm-rolling-lines must be > 0")
         if self.config.poll_seconds <= 0:
             raise ValueError("--llm-poll-seconds must be > 0")
+        if self.config.kb_top_k <= 0:
+            raise ValueError("--llm-kb-top-k must be > 0")
+        if not 0.0 <= self.config.kb_relevance_threshold <= 1.0:
+            raise ValueError("--llm-kb-threshold must be between 0 and 1")
         if self.config.trigger_mode == "keyword" and not self.config.trigger_keyword.strip():
             raise ValueError("--llm-trigger-keyword must not be empty when --llm-trigger-mode keyword is used")
 
         try:
+            from langchain_core.documents import Document
+            from langchain_core.vectorstores import InMemoryVectorStore
+            from langchain_openai import OpenAIEmbeddings
             from openai import OpenAI
         except ImportError as exc:
             raise RuntimeError(
-                "LLM log watcher requires the 'openai' package. Install the server dependencies again after "
-                "updating requirements."
+                "LLM log watcher requires the OpenAI and LangChain dependencies. Install the server dependencies "
+                "again after updating requirements."
             ) from exc
 
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -83,6 +95,38 @@ class OpenAILogPromptWatcher:
         if not self._system_prompt:
             raise RuntimeError(f"LLM system prompt file is empty: {prompt_path}")
 
+        kb_path = self.config.kb_json_path
+        if not kb_path.exists():
+            raise RuntimeError(f"LLM watcher knowledge base file does not exist: {kb_path}")
+        kb_entries = json.loads(kb_path.read_text(encoding="utf-8"))
+        if not isinstance(kb_entries, list) or not kb_entries:
+            raise RuntimeError(f"LLM watcher knowledge base is empty or invalid: {kb_path}")
+
+        docs = []
+        for idx, entry in enumerate(kb_entries):
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title", "")).strip()
+            text = str(entry.get("text", "")).strip()
+            if not title and not text:
+                continue
+            docs.append(
+                Document(
+                    page_content=f"{title}\n\n{text}".strip(),
+                    metadata={
+                        "url": str(entry.get("url", "")).strip(),
+                        "title": title,
+                        "chunk_idx": entry.get("chunk_idx"),
+                        "kb_idx": idx,
+                    },
+                )
+            )
+        if not docs:
+            raise RuntimeError(f"LLM watcher knowledge base has no usable entries: {kb_path}")
+
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=api_key)
+        self._vector_store = InMemoryVectorStore(embeddings)
+        self._vector_store.add_documents(documents=docs)
         self._client = OpenAI(api_key=api_key)
 
     async def run(self) -> None:
@@ -181,8 +225,19 @@ class OpenAILogPromptWatcher:
         return await asyncio.to_thread(_read_rolling_lines)
 
     async def _generate_prompt(self, payload: str) -> str:
-        if self._client is None:
+        if self._client is None or self._vector_store is None:
             raise RuntimeError("OpenAI client is not initialized.")
+
+        query = self._extract_query(payload)
+        if not query:
+            logger.info("llm log watcher found no user query in transcript; skipping injection")
+            return ""
+
+        retrieved_docs = await self._retrieve_docs(query)
+        if not retrieved_docs:
+            logger.info("llm log watcher found no relevant KB context for query: %s", query)
+            return ""
+        context_str = self._build_context_string(retrieved_docs)
 
         def _request() -> str:
             system_prompt = self._system_prompt
@@ -202,7 +257,16 @@ class OpenAILogPromptWatcher:
                     },
                     {
                         "role": "user",
-                        "content": [{"type": "input_text", "text": payload}],
+                        "content": [{
+                            "type": "input_text",
+                            "text": (
+                                f"TRANSCRIPT CONTEXT:\n{payload}\n\n"
+                                f"RETRIEVED CONTEXT:\n{context_str}\n\n"
+                                f"USER QUESTION: {query}\n\n"
+                                "Answer the user's question using only the retrieved context above. "
+                                "If the retrieved context does not answer the question, return an empty response."
+                            ),
+                        }],
                     },
                 ],
             )
@@ -212,6 +276,53 @@ class OpenAILogPromptWatcher:
             return str(output_text or "").strip()
 
         return await asyncio.to_thread(_request)
+
+    async def _retrieve_docs(self, query: str) -> list:
+        def _search() -> list:
+            assert self._vector_store is not None
+            retrieved_with_scores = self._vector_store.similarity_search_with_score(
+                query,
+                k=self.config.kb_top_k,
+            )
+            return [
+                doc for doc, score in retrieved_with_scores
+                if score >= self.config.kb_relevance_threshold
+            ]
+
+        return await asyncio.to_thread(_search)
+
+    def _extract_query(self, payload: str) -> str:
+        user_lines: list[str] = []
+        ignored_lines: list[str] = []
+
+        for raw_line in payload.splitlines():
+            line = raw_line.strip()
+            if line.startswith("[user ignored]"):
+                ignored_lines.append(line[len("[user ignored]"):].strip())
+            elif line.startswith("[user]"):
+                user_lines.append(line[len("[user]"):].strip())
+
+        if self.config.trigger_mode == "keyword":
+            parts = []
+            if user_lines:
+                parts.append(user_lines[-1])
+            parts.extend(text for text in ignored_lines if text)
+            return "\n".join(part for part in parts if part).strip()
+
+        if user_lines:
+            return user_lines[-1]
+        if ignored_lines:
+            return ignored_lines[-1]
+        return ""
+
+    def _build_context_string(self, docs: list) -> str:
+        context_parts = []
+        for idx, doc in enumerate(docs, start=1):
+            context_parts.append(
+                f"[Source {idx}] {doc.metadata.get('title', '')} - {doc.metadata.get('url', '')}\n"
+                f"{doc.page_content}"
+            )
+        return "\n\n".join(context_parts)
 
     def _format_injection_text(self, llm_output: str) -> str:
         template = self.config.injection_template.strip()

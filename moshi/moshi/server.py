@@ -1001,6 +1001,24 @@ def main():
         help="Path to the text file used as the system prompt for the log watcher.",
     )
     parser.add_argument(
+        "--llm-kb-json",
+        type=str,
+        default=str(Path(__file__).with_name("knowledge").joinpath("hellotech_kb.json")),
+        help="Path to the HelloTech knowledge base JSON used by the log watcher.",
+    )
+    parser.add_argument(
+        "--llm-kb-top-k",
+        type=int,
+        default=6,
+        help="Number of KB matches to retrieve before relevance filtering.",
+    )
+    parser.add_argument(
+        "--llm-kb-threshold",
+        type=float,
+        default=0.3,
+        help="Minimum retrieval similarity score required for KB context to be used.",
+    )
+    parser.add_argument(
         "--llm-trigger-mode",
         choices=("user", "any", "keyword"),
         default="user",
@@ -1063,6 +1081,10 @@ def main():
         raise ValueError("--transcription-overlap-seconds must be >= 0")
     if args.llm_rolling_lines <= 0:
         raise ValueError("--llm-rolling-lines must be > 0")
+    if args.llm_kb_top_k <= 0:
+        raise ValueError("--llm-kb-top-k must be > 0")
+    if not 0.0 <= args.llm_kb_threshold <= 1.0:
+        raise ValueError("--llm-kb-threshold must be between 0 and 1")
     if args.llm_poll_seconds <= 0:
         raise ValueError("--llm-poll-seconds must be > 0")
     if args.llm_injection_template and "{prompt}" not in args.llm_injection_template:
@@ -1104,9 +1126,12 @@ def main():
         )
     if args.llm_log_watcher:
         logger.info(
-            "llm log watcher enabled: model=%s system_prompt=%s trigger=%s keyword=%s payload=%s poll=%.2fs",
+            "llm log watcher enabled: model=%s system_prompt=%s kb=%s topk=%d threshold=%.2f trigger=%s keyword=%s payload=%s poll=%.2fs",
             args.llm_model,
             args.llm_system_prompt_file,
+            args.llm_kb_json,
+            args.llm_kb_top_k,
+            args.llm_kb_threshold,
             args.llm_trigger_mode,
             args.llm_trigger_keyword,
             args.llm_payload_mode,
@@ -1174,6 +1199,9 @@ def main():
             enabled=args.llm_log_watcher,
             model=args.llm_model,
             system_prompt_file=Path(args.llm_system_prompt_file),
+            kb_json_path=Path(args.llm_kb_json),
+            kb_top_k=args.llm_kb_top_k,
+            kb_relevance_threshold=args.llm_kb_threshold,
             trigger_mode=args.llm_trigger_mode,
             trigger_keyword=args.llm_trigger_keyword.strip(),
             payload_mode=args.llm_payload_mode,
