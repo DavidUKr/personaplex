@@ -560,7 +560,10 @@ class ServerState:
                     nonlocal effective_prompt_text
                     injected_prompt_text = apply_live_prompt_prefix(prompt_text, self.live_prompt_prefix)
                     effective_prompt_text = build_effective_prompt(injected_prompt_text)
-                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(effective_prompt_text))
+                    # Step only the new addendum; the initial system prompt and prior turns are
+                    # already in the streaming KV cache. Re-stepping the cumulative prompt makes
+                    # the model treat it as a fresh session start and re-greet the user.
+                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(injected_prompt_text))
                     self.lm_gen.step_text_prompt_tokens(prompt_tokens)
                     self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
                     return injected_prompt_text
