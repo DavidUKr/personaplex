@@ -199,10 +199,13 @@ def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     keyword = trigger_keyword.strip()
     instruction = (
         "If the user asks a question, "
-        f'say exactly "{keyword}." '
-        f"Then wait for new system information before answering. You will receive [SYSTEM PROMPT]."
-        "Do not guess or invent facts while waiting."
-        f"Only use \'{keyword}\' when the user asks a question."
+        f'say exactly "Let me check with {keyword}." '
+        "Then wait silently for new system information before answering. "
+        'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:". '
+        "When you receive that, immediately speak the full answer that follows, "
+        "preserving every step and detail. Do not summarize, skip steps, or wrap up early. "
+        "Do not guess or invent facts while waiting. "
+        f"Only ask for {keyword} when the user asks a question."
     )
     cleaned_base_prompt = base_prompt.strip()
     if not cleaned_base_prompt:
@@ -247,7 +250,7 @@ class ServerState:
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
-                 live_prompt_prefix: str = "[SYSTEM PROMPT]:",
+                 live_prompt_prefix: str = "Relay this answer to the customer in full:",
                  sampling_config: SamplingConfig | None = None,
                  session_params_override: bool = False,
                  transcription_config: TranscriptionConfig | None = None,
@@ -560,7 +563,10 @@ class ServerState:
                     nonlocal effective_prompt_text
                     injected_prompt_text = apply_live_prompt_prefix(prompt_text, self.live_prompt_prefix)
                     effective_prompt_text = build_effective_prompt(injected_prompt_text)
-                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(effective_prompt_text))
+                    # Step only the new addendum; the initial system prompt and prior turns are
+                    # already in the streaming KV cache. Re-stepping the cumulative prompt makes
+                    # the model treat it as a fresh session start and re-greet the user.
+                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(injected_prompt_text))
                     self.lm_gen.step_text_prompt_tokens(prompt_tokens)
                     self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
                     return injected_prompt_text
@@ -995,7 +1001,7 @@ def main():
     parser.add_argument(
         "--live-prompt-prefix",
         type=str,
-        default="[SYSTEM PROMPT]:",
+        default="Relay this answer to the customer in full:",
         help="Prefix added to each injected live prompt before it is sent to the model.",
     )
     parser.add_argument(
