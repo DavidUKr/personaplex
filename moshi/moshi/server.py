@@ -197,10 +197,10 @@ def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     keyword = trigger_keyword.strip()
     instruction = (
         "If the user asks a question, "
-        f'say exactly "Let me check with {keyword}." '
+        f'say exactly "{keyword}." '
         f"Then wait for new system information before answering. You will receive [SYSTEM PROMPT]."
         "Do not guess or invent facts while waiting."
-        f"Only ask for {keyword} when the user asks a question."
+        f"Only use \'{keyword}\' when the user asks a question."
     )
     cleaned_base_prompt = base_prompt.strip()
     if not cleaned_base_prompt:
