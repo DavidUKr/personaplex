@@ -200,8 +200,11 @@ def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     instruction = (
         "If the user asks a question, "
         f'say exactly "Let me check with {keyword}." '
-        f"Then wait for new system information before answering. You will receive [SYSTEM PROMPT]."
-        "Do not guess or invent facts while waiting."
+        "Then wait silently for new system information before answering. "
+        'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:". '
+        "When you receive that, immediately speak the full answer that follows, "
+        "preserving every step and detail. Do not summarize, skip steps, or wrap up early. "
+        "Do not guess or invent facts while waiting. "
         f"Only ask for {keyword} when the user asks a question."
     )
     cleaned_base_prompt = base_prompt.strip()
@@ -247,7 +250,7 @@ class ServerState:
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
-                 live_prompt_prefix: str = "[SYSTEM PROMPT]:",
+                 live_prompt_prefix: str = "Relay this answer to the customer in full:",
                  sampling_config: SamplingConfig | None = None,
                  session_params_override: bool = False,
                  transcription_config: TranscriptionConfig | None = None,
@@ -998,7 +1001,7 @@ def main():
     parser.add_argument(
         "--live-prompt-prefix",
         type=str,
-        default="[SYSTEM PROMPT]:",
+        default="Relay this answer to the customer in full:",
         help="Prefix added to each injected live prompt before it is sent to the model.",
     )
     parser.add_argument(
