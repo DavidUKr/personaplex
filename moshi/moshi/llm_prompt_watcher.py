@@ -44,12 +44,14 @@ class OpenAILogPromptWatcher:
         queue_live_prompt: Callable[[str, str], bool],
         start_keyword_wait: Callable[[Path], bool],
         cancel_keyword_wait: Callable[[Path], None],
+        can_start_keyword_wait: Callable[[Path], bool],
     ):
         self.config = config
         self.get_target_log_path = get_target_log_path
         self.queue_live_prompt = queue_live_prompt
         self.start_keyword_wait = start_keyword_wait
         self.cancel_keyword_wait = cancel_keyword_wait
+        self.can_start_keyword_wait = can_start_keyword_wait
         self._states: dict[Path, _LogReadState] = {}
         self._client = None
         self._system_prompt = ""
@@ -139,24 +141,26 @@ class OpenAILogPromptWatcher:
             )
             if not keyword_triggered:
                 return
-            if not self.start_keyword_wait(log_path):
+            if not self.can_start_keyword_wait(log_path):
                 return
 
         payload = await self._build_payload(log_path)
         if not payload:
-            if self.config.trigger_mode == "keyword":
-                self.cancel_keyword_wait(log_path)
             return
         llm_output = (await self._generate_prompt(payload)).strip()
         if not llm_output:
             logger.warning("llm log watcher returned empty output; skipping injection")
-            if self.config.trigger_mode == "keyword":
-                self.cancel_keyword_wait(log_path)
             return
 
         logger.info("llm log watcher output: %s", llm_output)
         injection_text = self._format_injection_text(llm_output)
         prompt_source = "llm_keyword" if self.config.trigger_mode == "keyword" else "llm_watcher"
+        if self.config.trigger_mode == "keyword":
+            if not self.start_keyword_wait(log_path):
+                logger.warning(
+                    "generated llm prompt but session no longer eligible for keyword wait; dropping injection"
+                )
+                return
         if self.queue_live_prompt(injection_text, prompt_source):
             logger.info("queued llm-generated live prompt")
         else:

@@ -66,6 +66,8 @@ TEXT_TOKEN_EOS = 2
 TEXT_TOKEN_PAD = 3
 LIVE_PROMPT_BOUNDARY_STREAK = 2
 LIVE_PROMPT_MAX_STEPS = 48
+LIVE_PROMPT_PRE_INJECT_SILENT_STREAK = 6
+LIVE_PROMPT_PRE_INJECT_MAX_WAIT_STEPS = 200
 WS_KEEPALIVE_SECONDS = 2.0
 INITIAL_METADATA_TIMEOUT_SECONDS = 3.0
 
@@ -293,6 +295,7 @@ class ServerState:
                 queue_live_prompt=self.queue_live_prompt_with_source,
                 start_keyword_wait=self.start_keyword_wait,
                 cancel_keyword_wait=self.cancel_keyword_wait,
+                can_start_keyword_wait=self.can_start_keyword_wait,
             )
 
     def apply_sampling_config(self, sampling_config: SamplingConfig) -> None:
@@ -377,7 +380,7 @@ class ServerState:
         prompt_queue.put_nowait(PromptCommand(text=prompt_text, source=source))
         return True
 
-    def start_keyword_wait(self, log_path: Path) -> bool:
+    def can_start_keyword_wait(self, log_path: Path) -> bool:
         if self._llm_trigger_mode != "keyword":
             return False
         if self.active_conversation_log_path != log_path:
@@ -385,6 +388,11 @@ class ServerState:
         if self.active_prompt_queue is None:
             return False
         if self._keyword_wait_active:
+            return False
+        return True
+
+    def start_keyword_wait(self, log_path: Path) -> bool:
+        if not self.can_start_keyword_wait(log_path):
             return False
         self._keyword_wait_active = True
         self._keyword_wait_log_path = log_path
@@ -498,19 +506,36 @@ class ServerState:
                 prompt_interrupt_active = False
                 boundary_streak = 0
                 boundary_steps = 0
+                model_silent_streak = 0
+                pending_pre_inject_steps = 0
 
                 def drain_prompt_queue():
-                    nonlocal prompt_interrupt_active, all_pcm_data
+                    nonlocal prompt_interrupt_active, all_pcm_data, pending_pre_inject_steps
                     while True:
                         try:
                             pending_prompt_commands.append(session_prompt_queue.get_nowait())
                         except asyncio.QueueEmpty:
                             break
-                    if pending_prompt_commands and not prompt_interrupt_active:
+                    if not pending_prompt_commands:
+                        pending_pre_inject_steps = 0
+                        return
+                    if prompt_interrupt_active:
+                        return
+                    silent_ready = model_silent_streak >= LIVE_PROMPT_PRE_INJECT_SILENT_STREAK
+                    timeout_ready = pending_pre_inject_steps >= LIVE_PROMPT_PRE_INJECT_MAX_WAIT_STEPS
+                    if silent_ready or timeout_ready:
                         prompt_interrupt_active = True
                         all_pcm_data = None
                         _ = opus_reader.read_pcm()
-                        clog.log("info", "queued live text prompt; interrupting user audio feed")
+                        reason = "silent_streak" if silent_ready else "max_wait_timeout"
+                        clog.log(
+                            "info",
+                            f"queued live text prompt; interrupting user audio feed "
+                            f"(reason={reason}, silent_streak={model_silent_streak}, "
+                            f"pre_inject_steps={pending_pre_inject_steps})",
+                        )
+                    else:
+                        pending_pre_inject_steps += 1
 
                 async def emit_tokens(tokens: torch.Tensor):
                     text_token = tokens[0, 0, 0].item()
@@ -557,8 +582,10 @@ class ServerState:
                             text_token = await emit_tokens(silence_tokens)
                             if text_token in (TEXT_TOKEN_EOS, TEXT_TOKEN_PAD):
                                 boundary_streak += 1
+                                model_silent_streak += 1
                             else:
                                 boundary_streak = 0
+                                model_silent_streak = 0
                         boundary_steps += 1
                         if boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK or boundary_steps >= LIVE_PROMPT_MAX_STEPS:
                             for prompt_command in pending_prompt_commands:
@@ -572,6 +599,8 @@ class ServerState:
                             prompt_interrupt_active = False
                             boundary_streak = 0
                             boundary_steps = 0
+                            pending_pre_inject_steps = 0
+                            model_silent_streak = 0
                             all_pcm_data = None
                         continue
 
@@ -580,6 +609,17 @@ class ServerState:
                         pcm = opus_reader.read_pcm()
                         if pcm.shape[-1] != 0 and session_transcriber is not None:
                             session_transcriber.submit_pcm(pcm)
+                        silence_tokens = self.lm_gen.step(
+                            moshi_tokens=self.lm_gen._encode_zero_frame(),
+                            text_token=self.lm_gen.zero_text_code,
+                            input_tokens=self.lm_gen._encode_sine_frame(),
+                        )
+                        if silence_tokens is not None:
+                            text_token = await emit_tokens(silence_tokens)
+                            if text_token in (TEXT_TOKEN_EOS, TEXT_TOKEN_PAD):
+                                model_silent_streak += 1
+                            else:
+                                model_silent_streak = 0
                         continue
 
                     pcm = opus_reader.read_pcm()
@@ -605,7 +645,11 @@ class ServerState:
                             tokens = self.lm_gen.step(codes[:, :, c: c + 1])
                             if tokens is None:
                                 continue
-                            await emit_tokens(tokens)
+                            text_token = await emit_tokens(tokens)
+                            if text_token in (TEXT_TOKEN_EOS, TEXT_TOKEN_PAD):
+                                model_silent_streak += 1
+                            else:
+                                model_silent_streak = 0
                         if prompt_interrupt_active or all_pcm_data is None:
                             break
 
