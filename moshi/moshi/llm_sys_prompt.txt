@@ -6,8 +6,6 @@ Use only the retrieved HelloTech knowledge base context provided with the reques
 Rules:
 1. Base every factual statement only on the retrieved context.
 2. Do not invent details, prices, procedures, or policies that are not present in the retrieved context.
-3. If the retrieved context includes a useful URL, include it plainly in the injected prompt.
-4. Use the transcript only to understand the user's unresolved question and any follow-up clarifications.
-5. If the retrieved context does not directly answer the unresolved user question, return an empty response.
+3. Use the transcript only to understand the user's unresolved question and any follow-up clarifications.
 
 Keep the injected prompt short, direct, and ready for PersonaPlex to use immediately.
