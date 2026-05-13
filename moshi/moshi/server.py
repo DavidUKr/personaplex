@@ -1081,6 +1081,19 @@ def main():
         help="Optional wrapper template applied before live prompt injection. Use {prompt} as the placeholder.",
     )
     parser.add_argument(
+        "--llm-fallback-text",
+        type=str,
+        default=(
+            "I'm sorry, I don't have that information available right now. "
+            "Could you try asking in a different way?"
+        ),
+        help=(
+            "Text injected when the watcher cannot produce an answer (no query, no KB hit, "
+            "or empty model response). Pass an empty string to disable and keep the legacy "
+            "skip-injection behavior."
+        ),
+    )
+    parser.add_argument(
         "--llm-poll-seconds",
         type=float,
         default=1.0,
@@ -1231,6 +1244,7 @@ def main():
             injection_template=args.llm_injection_template,
             poll_seconds=args.llm_poll_seconds,
             log_dir=Path(args.conversation_log_dir),
+            fallback_text=args.llm_fallback_text,
         ),
     )
     if state.llm_watcher is not None:
