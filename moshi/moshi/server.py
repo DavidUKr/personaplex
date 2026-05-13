@@ -249,7 +249,7 @@ class ServerState:
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
-                 save_voice_prompt_embeddings: bool = False, live_prompt_mode: str = "append",
+                 save_voice_prompt_embeddings: bool = False,
                  live_prompt_prefix: str = "Relay this answer to the customer in full:",
                  sampling_config: SamplingConfig | None = None,
                  session_params_override: bool = False,
@@ -261,7 +261,6 @@ class ServerState:
         self.text_tokenizer = text_tokenizer
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
-        self.live_prompt_mode = live_prompt_mode
         self.live_prompt_prefix = live_prompt_prefix
         self.sampling_config = sampling_config or PROFILE_PRESETS["default"]
         self.session_params_override = session_params_override
@@ -504,7 +503,6 @@ class ServerState:
 
             async def opus_loop():
                 all_pcm_data = None
-                effective_prompt_text = initial_text_prompt
                 pending_prompt_commands: list[PromptCommand] = []
                 prompt_interrupt_active = False
                 boundary_streak = 0
@@ -554,15 +552,8 @@ class ServerState:
                         await ws.send_bytes(b"\x02" + bytes(piece, encoding="utf8"))
                     return text_token
 
-                def build_effective_prompt(new_prompt_text: str) -> str:
-                    if self.live_prompt_mode == "replace" or not effective_prompt_text:
-                        return new_prompt_text
-                    return f"{effective_prompt_text}\n{new_prompt_text}"
-
                 def inject_prompt(prompt_text: str):
-                    nonlocal effective_prompt_text
                     injected_prompt_text = apply_live_prompt_prefix(prompt_text, self.live_prompt_prefix)
-                    effective_prompt_text = build_effective_prompt(injected_prompt_text)
                     # Step only the new addendum; the initial system prompt and prior turns are
                     # already in the streaming KV cache. Re-stepping the cumulative prompt makes
                     # the model treat it as a fresh session start and re-greet the user.
@@ -993,12 +984,6 @@ def main():
         help="Read one live prompt per line from stdin and inject it into the active session.",
     )
     parser.add_argument(
-        "--live-prompt-mode",
-        choices=("append", "replace"),
-        default="replace",
-        help="How stdin live prompts combine with the current session prompt.",
-    )
-    parser.add_argument(
         "--live-prompt-prefix",
         type=str,
         default="Relay this answer to the customer in full:",
@@ -1222,7 +1207,6 @@ def main():
         device=args.device,
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
-        live_prompt_mode=args.live_prompt_mode,
         live_prompt_prefix=args.live_prompt_prefix,
         sampling_config=sampling_config,
         session_params_override=args.session_params_override,
