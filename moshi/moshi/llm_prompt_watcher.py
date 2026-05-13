@@ -63,6 +63,7 @@ class LLMWatcherConfig:
         "I'm sorry, I don't have that information available right now. "
         "Could you try asking in a different way?"
     )
+    keyword_debounce_seconds: float = 2.0
 
 
 @dataclass
@@ -230,6 +231,16 @@ class OpenAILogPromptWatcher:
             self.config.trigger_mode,
             log_path.name,
         )
+
+        # Keyword detection can fire before the customer's in-flight utterance
+        # has been committed to the conversation log by the transcription
+        # pipeline. Wait a beat so _build_payload reads the question line, not
+        # only the greeting that preceded it.
+        if (
+            self.config.trigger_mode == "keyword"
+            and self.config.keyword_debounce_seconds > 0
+        ):
+            await asyncio.sleep(self.config.keyword_debounce_seconds)
 
         payload = await self._build_payload(log_path)
         if not payload:

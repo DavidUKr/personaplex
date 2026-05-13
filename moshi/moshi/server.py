@@ -1099,6 +1099,16 @@ def main():
         help="Polling interval in seconds for the conversation log watcher.",
     )
     parser.add_argument(
+        "--llm-keyword-debounce",
+        type=float,
+        default=2.0,
+        help=(
+            "Seconds to wait after keyword detection before extracting the user query, "
+            "giving the transcription pipeline time to commit the in-flight customer "
+            "utterance. Set to 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--voice-prompt-dir",
         type=str,
         help=(
@@ -1131,6 +1141,8 @@ def main():
         raise ValueError("--llm-kb-threshold must be between 0 and 1")
     if args.llm_poll_seconds <= 0:
         raise ValueError("--llm-poll-seconds must be > 0")
+    if args.llm_keyword_debounce < 0:
+        raise ValueError("--llm-keyword-debounce must be >= 0")
     if args.llm_injection_template and "{prompt}" not in args.llm_injection_template:
         raise ValueError("--llm-injection-template must include the {prompt} placeholder")
     if args.llm_trigger_mode == "keyword" and not args.llm_trigger_keyword.strip():
@@ -1253,6 +1265,7 @@ def main():
             poll_seconds=args.llm_poll_seconds,
             log_dir=Path(args.conversation_log_dir),
             fallback_text=args.llm_fallback_text,
+            keyword_debounce_seconds=args.llm_keyword_debounce,
         ),
     )
     if state.llm_watcher is not None:
