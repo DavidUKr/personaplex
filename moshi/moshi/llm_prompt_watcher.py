@@ -59,6 +59,10 @@ class LLMWatcherConfig:
     injection_template: str = ""
     poll_seconds: float = 1.0
     log_dir: Path = Path("./logs/conversations")
+    fallback_text: str = (
+        "I'm sorry, I don't have that information available right now. "
+        "Could you try asking in a different way?"
+    )
 
 
 @dataclass
@@ -226,8 +230,13 @@ class OpenAILogPromptWatcher:
             return
         llm_output = (await self._generate_prompt(payload)).strip()
         if not llm_output:
-            logger.warning("llm log watcher returned empty output; skipping injection")
-            return
+            fallback = self.config.fallback_text.strip()
+            if fallback:
+                logger.info("llm log watcher returned empty output; using fallback text")
+                llm_output = fallback
+            else:
+                logger.warning("llm log watcher returned empty output; skipping injection")
+                return
 
         logger.info("llm log watcher output: %s", llm_output)
         injection_text = self._format_injection_text(llm_output)

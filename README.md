@@ -269,6 +269,8 @@ Useful options:
   - Wraps the LLM output before injecting it into the live session.
 - `--llm-poll-seconds 0.5`
   - Changes how often the watcher polls the log directory.
+- `--llm-fallback-text "I'm sorry, I don't have that information…"`
+  - Text injected when the watcher cannot produce an answer (no user query extracted, no relevant KB hit, or the model returned an empty response per the "return empty when no answer" instruction). Defaults to a polite apology so PersonaPlex never leaves the customer hanging after saying the supervisor phrase. Pass an empty string (`--llm-fallback-text ""`) to restore the legacy skip-injection behavior.
 
 Example using a custom model:
 ```bash
@@ -295,6 +297,8 @@ SSL_DIR=$(mktemp -d); python -m moshi.server \
 If no active session log is registered, the watcher falls back to the newest `.log` file in `--conversation-log-dir`. If it generates output while no session is active, the output is still printed but the live injection is dropped.
 
 In `keyword` mode, PersonaPlex should say the configured supervisor phrase when it needs outside context. After that phrase is logged, the watcher requests a supervisor answer, PersonaPlex stops consuming new user audio, and any continued user speech is transcribed as `[user ignored]` until the supervisor prompt is injected. Once the prompt is applied, normal turn-taking resumes.
+
+If the watcher cannot produce an answer (e.g. the user's question doesn't match the knowledge base), `--llm-fallback-text` is injected instead so PersonaPlex can gracefully tell the customer it doesn't have the information rather than waiting silently after the supervisor phrase.
 
 ### Offline Evaluation
 
