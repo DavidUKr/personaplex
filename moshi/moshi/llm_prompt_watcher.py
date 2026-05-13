@@ -22,7 +22,7 @@ class LLMWatcherConfig:
     model: str = "gpt-5-nano"
     system_prompt_file: Path = Path(__file__).with_name("llm_sys_prompt.txt")
     trigger_mode: str = "user"
-    trigger_keyword: str = "my supervisor"
+    trigger_keyword: str = "let me check"
     payload_mode: str = "rolling"
     rolling_lines: int = 15
     injection_template: str = ""
@@ -147,6 +147,12 @@ class OpenAILogPromptWatcher:
                 return
             if not self.can_start_keyword_wait(log_path):
                 return
+
+        logger.warning(
+            "llm watcher triggered (mode=%s, log=%s)",
+            self.config.trigger_mode,
+            log_path.name,
+        )
 
         payload = await self._build_payload(log_path)
         if not payload:

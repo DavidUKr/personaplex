@@ -195,11 +195,10 @@ def apply_live_prompt_prefix(text: str, prefix: str) -> str:
     return f"{normalized_prefix} {cleaned}"
 
 
-def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
-    keyword = trigger_keyword.strip()
+def build_keyword_mode_prompt(base_prompt: str) -> str:
     instruction = (
         "When the user asks a question whose answer is outside your knowledge, "
-        f'say exactly "Let me check with {keyword}." and then stay silent. '
+        'say "Let me check on that." and then stay silent. '
         'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:" '
         "— read the full answer that follows aloud, word-for-word, including every step. "
         "Do not invent details while waiting."
@@ -456,7 +455,7 @@ class ServerState:
             else:
                 initial_text_prompt = request.query.get("text_prompt", "").strip()
             if self._llm_trigger_mode == "keyword":
-                initial_text_prompt = build_keyword_mode_prompt(initial_text_prompt, self._llm_trigger_keyword)
+                initial_text_prompt = build_keyword_mode_prompt(initial_text_prompt)
             self.lm_gen.text_prompt_tokens = (
                 self.text_tokenizer.encode(wrap_with_system_tags(initial_text_prompt))
                 if initial_text_prompt
@@ -1041,8 +1040,8 @@ def main():
     parser.add_argument(
         "--llm-trigger-keyword",
         type=str,
-        default="my supervisor",
-        help="Case-insensitive phrase that triggers supervisor lookup in --llm-trigger-mode keyword.",
+        default="let me check",
+        help="Case-insensitive substring matched against [model] log lines to trigger the supervisor lookup in --llm-trigger-mode keyword.",
     )
     parser.add_argument(
         "--llm-payload-mode",
