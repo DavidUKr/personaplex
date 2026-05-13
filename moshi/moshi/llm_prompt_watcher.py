@@ -232,11 +232,10 @@ class OpenAILogPromptWatcher:
         if not llm_output:
             fallback = self.config.fallback_text.strip()
             if fallback:
-                logger.info("llm log watcher returned empty output; using fallback text")
+                logger.info("llm watcher empty; injecting fallback text")
                 llm_output = fallback
             else:
-                logger.warning("llm log watcher returned empty output; skipping injection")
-                return
+                return  # specific reason already logged at WARNING in _generate_prompt
 
         logger.info("llm log watcher output: %s", llm_output)
         injection_text = self._format_injection_text(llm_output)
@@ -276,12 +275,20 @@ class OpenAILogPromptWatcher:
 
         query = self._extract_query(payload)
         if not query:
-            logger.info("llm log watcher found no user query in transcript; skipping injection")
+            logger.warning("llm watcher empty: no user query extracted from transcript payload")
             return ""
 
-        retrieved_docs = await self._retrieve_docs(query)
+        retrieved_docs, all_scores = await self._retrieve_docs(query)
         if not retrieved_docs:
-            logger.info("llm log watcher found no relevant KB context for query: %s", query)
+            top_score = max(all_scores) if all_scores else 0.0
+            logger.warning(
+                "llm watcher empty: no KB context above threshold %.2f for query %r "
+                "(top score among %d candidates: %.3f)",
+                self.config.kb_relevance_threshold,
+                query,
+                len(all_scores),
+                top_score,
+            )
             return ""
         context_str = self._build_context_string(retrieved_docs)
 
@@ -321,19 +328,33 @@ class OpenAILogPromptWatcher:
                 return output_text
             return str(output_text or "").strip()
 
-        return await asyncio.to_thread(_request)
+        result = await asyncio.to_thread(_request)
+        if not result.strip():
+            kept_top = max(
+                (s for s in all_scores if s >= self.config.kb_relevance_threshold),
+                default=0.0,
+            )
+            logger.warning(
+                "llm watcher empty: KB returned %d docs (top score %.3f) but model %r produced no answer",
+                len(retrieved_docs),
+                kept_top,
+                self.config.model,
+            )
+        return result
 
-    async def _retrieve_docs(self, query: str) -> list:
-        def _search() -> list:
+    async def _retrieve_docs(self, query: str) -> tuple[list, list[float]]:
+        def _search() -> tuple[list, list[float]]:
             assert self._vector_store is not None
             retrieved_with_scores = self._vector_store.similarity_search_with_score(
                 query,
                 k=self.config.kb_top_k,
             )
-            return [
+            all_scores = [float(score) for _, score in retrieved_with_scores]
+            kept = [
                 doc for doc, score in retrieved_with_scores
                 if score >= self.config.kb_relevance_threshold
             ]
+            return kept, all_scores
 
         return await asyncio.to_thread(_search)
 
