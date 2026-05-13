@@ -293,20 +293,12 @@ class OpenAILogPromptWatcher:
         context_str = self._build_context_string(retrieved_docs)
 
         def _request() -> str:
-            system_prompt = self._system_prompt
-            if self.config.trigger_mode == "keyword":
-                system_prompt = (
-                    f"{system_prompt}\n\n"
-                    f'The handoff keyword is "{self.config.trigger_keyword.strip()}". '
-                    "When that phrase appears in a [model] line, answer the user's unresolved question "
-                    "using the transcript context, including any [user ignored] follow-up lines."
-                )
             response = self._client.responses.create(
                 model=self.config.model,
                 input=[
                     {
                         "role": "system",
-                        "content": [{"type": "input_text", "text": system_prompt}],
+                        "content": [{"type": "input_text", "text": self._system_prompt}],
                     },
                     {
                         "role": "user",
