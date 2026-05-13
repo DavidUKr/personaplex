@@ -34,6 +34,58 @@ When you add functionality that ties these together, keep the callback indirecti
 
 `_apply_bundle_defaults` in `server.py` lets `--default-keyword` and `--default_watcher` expand into multi-flag presets, but only for flags the user did not pass explicitly (`_cli_flag_present` does shallow argv inspection). If you add a preset, follow the same pattern: define the bundle, list its fields in `bundle_fields`, and let real CLI flags win.
 
+### Live-prompt injection — gotchas
+
+`inject_prompt` in `server.py` runs whenever the prompt queue drains at a safe boundary. Three things to know:
+
+1. **Step only the new addendum, never the cumulative system prompt.** `inject_prompt` encodes the freshly-prefixed `injected_prompt_text` (with `wrap_with_system_tags`) and calls `lm_gen.step_text_prompt_tokens(...)` on just that. Re-stepping the original `<system>` block makes the model believe a new session started and re-greet the customer.
+2. **Stepping text tokens does not emit audio.** `_step_text_prompt_core` in `models/lm.py` feeds zero audio frames while forcing the agent-text channel to the prompt tokens. The model "thinks" it said the prompt silently. After the audio-silence padding, normal generation resumes. This is why the model sometimes follows an injection with wrap-up phrases (*"Thank you for waiting. Let me know if you need anything else."*) instead of actually relaying the answer — open follow-up item.
+3. The `live_prompt_prefix` default is `Relay this answer to the customer in full:`. Build_keyword_mode_prompt's appended instruction explicitly tells Moshi to expect that prefix and read the body aloud word-for-word. If you change the prefix, update the instruction in `build_keyword_mode_prompt` to match.
+
+### Watcher logging visibility
+
+`llm_prompt_watcher.py` uses a plain `logging.getLogger(__name__)` with no handler. The watcher's `INFO` records get dropped silently — only `WARNING` and above reach stderr via Python's `lastResort` handler. When adding diagnostics that need to be visible to the operator on EC2 stderr, use `logger.warning(...)`. Reserve `logger.info(...)` for things you don't mind losing.
+
+Existing WARNING points (use them as the model when adding more): the `_poll_once` "llm watcher triggered (mode=…, log=…)" line that fires on every successful trigger, and the empty-output diagnostics in `_generate_prompt` that distinguish *no user query / no KB context above threshold / KB hit but model returned empty*.
+
+### Keyword-mode flow (door_qa_kb)
+
+When `--llm-trigger-mode keyword` (and `--default-keyword`):
+
+1. `LLMWatcherConfig.trigger_keyword` defaults to `"let me check"` (case-insensitive substring against `[model]` lines). It is **only** the watcher's detection substring; the canonical phrase Moshi is told to say is hardcoded as `Let me check on that.` inside `build_keyword_mode_prompt`. Don't re-couple them — that's why `build_keyword_mode_prompt(base_prompt: str)` no longer takes the keyword as a parameter.
+2. `ModelTextLogger.flush_phrases` is also seeded from `trigger_keyword` (see `flush_phrases = (self._llm_trigger_keyword,)` in `server.py`). This makes the conversation log flush the moment Moshi emits the keyword, so the watcher can detect it without waiting for a sentence terminator.
+3. On detection, the watcher logs the trigger WARNING, then waits `LLMWatcherConfig.keyword_debounce_seconds` (default `2.0`, `--llm-keyword-debounce`) so the transcription pipeline can commit any in-flight `[user]` line. Then `_build_payload` reads the log fresh.
+4. If `_generate_prompt` returns empty (no user query / no KB hit / model said empty), `LLMWatcherConfig.fallback_text` is injected so the customer isn't left hanging. Pass `--llm-fallback-text ""` to restore the legacy skip-injection behavior.
+5. `start_keyword_wait` is only called after a non-empty `_generate_prompt` (including the fallback path) — so while the OpenAI call is in flight, `is_keyword_wait_active()` is still false and the model's audio is unpaused. The keyword-wait flag pauses user audio only between injection commit and turn resumption.
+
+### Branch differences: `main` vs `door_qa_kb`
+
+These two branches share the same architecture but the watcher is materially different. Cherry-pick with care.
+
+| Area | `main` | `door_qa_kb` |
+|---|---|---|
+| `_generate_prompt` | Single OpenAI call. Only empty path: model returns empty. | RAG. Calls `_extract_query` → `_retrieve_docs` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` "text-embedding-3-small") → adds `RETRIEVED CONTEXT` to the user message before the OpenAI call. Three empty paths (no query / no KB hit / model empty), each logged at WARNING with score diagnostics. |
+| `LLMWatcherConfig` extras | — | `kb_json_path`, `kb_top_k`, `kb_relevance_threshold`. |
+| CLI flags | base set | adds `--llm-kb-json`, `--llm-kb-top-k`, `--llm-kb-threshold`. |
+| `llm_sys_prompt.txt` | older "produce one concise live prompt" wording | rewritten to "produce one concise answer for the on-call agent to read aloud" + KB-only rules. |
+| `_retrieve_docs` / `_extract_query` | not present | door-side helpers. |
+| Knowledge base assets | not present | `moshi/moshi/knowledge/hellotech_kb.json` (resolved via `_resolve_kb_path` fallback chain). |
+| Static dist path in `--default-keyword` | unset | `--static /home/ubuntu/personaplex/client/dist` (door's deploy layout). |
+
+Everything else — `build_keyword_mode_prompt`, `inject_prompt`, the live-prompt prefix, `fallback_text`, `keyword_debounce_seconds`, the trigger WARNING log, the removal of the dead `--live-prompt-mode` flag — is identical on both branches as of `2026-05-13`. Workflow: fixes land on door_qa_kb first; if they don't touch KB-specific code, cherry-pick to `main`. KB-aware fixes stay door-only.
+
+### Buffer & flush map (useful when debugging stuck/duplicated output)
+
+When a log entry, audio chunk, or prompt looks "stuck", check the layer that owns the relevant buffer:
+
+- `ModelTextLogger._buffer` (`transcription.py`) buffers `[model]` pieces until: (a) a `flush_phrases` substring appears (case-insensitive), (b) the last char is `.`/`?`/`!`/`\n` and `_find_flush_index` returns at the marker, or (c) buffer length exceeds 160 chars (then splits at the last space). `await model_text_logger.flush()` is the only forced-flush path; called before `inject_prompt` and at session shutdown.
+- `_LogReadState.partial_line` (`llm_prompt_watcher.py`) buffers the tail of a log read that didn't end on `\n`. If the log file never gets a trailing newline (e.g., process killed mid-write), the tail will sit in this buffer until the next poll completes the line.
+- `pending_prompt_commands` (`opus_loop` local) buffers `PromptCommand`s drained from `session_prompt_queue`. They are only flushed during `prompt_interrupt_active` once `boundary_streak >= LIVE_PROMPT_BOUNDARY_STREAK` or `boundary_steps >= LIVE_PROMPT_MAX_STEPS`. If the model never reaches a boundary, prompts can sit here.
+- `all_pcm_data` (`opus_loop` local) accumulates user PCM frames until at least `frame_size` (`= mimi.sample_rate / mimi.frame_rate`) samples are available. Reset to `None` whenever a prompt interrupt or keyword wait fires; that means user speech currently being buffered gets dropped on interrupt.
+- `SessionTranscriber` runs `--transcription-chunk-seconds` (default `6.0`) windows with `--transcription-overlap-seconds` (default `1.5`) overlap. A `[user]` line is only written when a chunk completes; in-flight audio can lag the actual speech by up to ~chunk-seconds. The keyword debounce (`keyword_debounce_seconds=2.0` default) mitigates this for the watcher, not for anything else that reads the log.
+- `opus_writer` / `opus_reader` (sphn) hold the WebSocket-side opus codec buffer. Audio in/out flow through these; if frontend reports silence, check whether `opus_reader.read_pcm()` was drained by an interrupt path (`_ = opus_reader.read_pcm()` shows up in both `drain_prompt_queue` and the `prompt_interrupt_active` branch).
+- Streaming KV cache in `lm_gen` itself (`streaming_forever(1)`). Not user-controlled — but recall that `inject_prompt` only steps the *new* addendum on purpose; the KV cache already holds the original system prompt and the conversation history.
+
 ## Common Commands
 
 ### Backend
