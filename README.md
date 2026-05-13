@@ -208,11 +208,6 @@ SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdi
 
 When enabled, each non-empty line typed into the same terminal is queued as a new prompt for the current active session. Before injection, the server prefixes each live prompt with `Relay this answer to the customer in full:` by default so the model treats the payload as an explicit directive to repeat back to the user rather than plain text. Once a prompt is queued, user audio is no longer fed to the model until the prompt is injected and live turn-taking resumes.
 
-By default, live prompts replace the session's current text prompt. Use `--live-prompt-mode append` to keep appending each injected prompt to the existing prompt instead:
-```bash
-SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-mode append
-```
-
 To customize or disable that prefix, use `--live-prompt-prefix`:
 ```bash
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --live-prompt-stdin --live-prompt-prefix "Relay this answer to the customer in full:"
