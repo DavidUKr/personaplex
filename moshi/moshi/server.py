@@ -198,14 +198,11 @@ def apply_live_prompt_prefix(text: str, prefix: str) -> str:
 def build_keyword_mode_prompt(base_prompt: str, trigger_keyword: str) -> str:
     keyword = trigger_keyword.strip()
     instruction = (
-        "If the user asks a question, "
-        f'say exactly "Let me check with {keyword}." '
-        "Then wait silently for new system information before answering. "
-        'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:". '
-        "When you receive that, immediately speak the full answer that follows, "
-        "preserving every step and detail. Do not summarize, skip steps, or wrap up early. "
-        "Do not guess or invent facts while waiting. "
-        f"Only ask for {keyword} when the user asks a question."
+        "When the user asks a question whose answer is outside your knowledge, "
+        f'say exactly "Let me check with {keyword}." and then stay silent. '
+        'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:" '
+        "— read the full answer that follows aloud, word-for-word, including every step. "
+        "Do not invent details while waiting."
     )
     cleaned_base_prompt = base_prompt.strip()
     if not cleaned_base_prompt:
