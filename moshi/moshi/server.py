@@ -595,6 +595,11 @@ class ServerState:
                             pending_pre_inject_steps = 0
                             model_silent_streak = 0
                             all_pcm_data = None
+                            # Drop user PCM that piled up while inject_prompt blocked the event
+                            # loop; otherwise the next iteration pulls a backlog and the inner
+                            # frame loop emits model audio faster than real-time, causing the
+                            # client worklet to drop frames (garbled/"fast" speech post-pause).
+                            _ = opus_reader.read_pcm()
                         continue
 
                     if self.is_keyword_wait_active():
