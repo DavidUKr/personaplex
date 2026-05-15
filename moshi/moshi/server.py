@@ -199,8 +199,10 @@ def build_keyword_mode_prompt(base_prompt: str) -> str:
     instruction = (
         "When the user asks a question whose answer is outside your knowledge, "
         'say "Let me check on that." and then stay silent. '
-        'A supervisor will reply with a message prefixed "Relay this answer to the customer in full:" '
-        "— read the full answer that follows aloud, word-for-word, including every step. "
+        'A supervisor will then reply with a message prefixed "Relay this answer to the customer in full:". '
+        "That supervisor message appears silently in your context — you have not said any of it aloud yet. "
+        "Your very next spoken utterance must be the full answer that follows the prefix, read aloud word-for-word, including every step. "
+        'Do not say "Thank you for waiting", "Is there anything else", or any wrap-up phrase before the answer — start speaking the answer directly. '
         "Do not invent details while waiting."
     )
     cleaned_base_prompt = base_prompt.strip()
