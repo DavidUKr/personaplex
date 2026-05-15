@@ -550,10 +550,12 @@ class ServerState:
 
                 def inject_prompt(prompt_text: str):
                     injected_prompt_text = apply_live_prompt_prefix(prompt_text, self.live_prompt_prefix)
-                    # Step only the new addendum; the initial system prompt and prior turns are
-                    # already in the streaming KV cache. Re-stepping the cumulative prompt makes
-                    # the model treat it as a fresh session start and re-greet the user.
-                    prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(injected_prompt_text))
+                    # EXPERIMENT (experiment/inject-no-system-tags): step the addendum WITHOUT
+                    # wrapping in <system>...<system>. Hypothesis: the model treats any system-tag
+                    # block mid-conversation as a session-start cue and re-greets the customer
+                    # even when the persona body isn't re-stepped. If the re-greet stops with
+                    # this change, drop wrap_with_system_tags from inject_prompt permanently.
+                    prompt_tokens = self.text_tokenizer.encode(injected_prompt_text)
                     self.lm_gen.step_text_prompt_tokens(prompt_tokens)
                     self.lm_gen.step_audio_silence_frames(self.lm_gen.audio_silence_frame_cnt)
                     return injected_prompt_text
